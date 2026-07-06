@@ -1,0 +1,30 @@
+{
+  "_comment": "Device / endpoint / availability data is NOT in Jira. Provide it here (from Intune, Defender/agent status, and platform monitoring) and pass with --supplemental. Omit any section to show a 'provided separately' placeholder. Meter rows are [label, achieved, total, kind] where kind is one of ok|warn|bad|blue.",
+  "device": {
+    "total": 87, "enrolled": 84, "outstanding": 3, "compliant": 79, "win": 61, "mac": 23,
+    "meters": [
+      ["Policies deployed", 84, 84, "ok"],
+      ["Definitions current", 82, 84, "ok"],
+      ["OS updates current", 81, 84, "ok"],
+      ["Disk encryption on", 84, 84, "ok"]
+    ],
+    "note": "3 endpoints outstanding (macOS, with client); 3 behind on OS updates — scheduled through Intune this week."
+  },
+  "endpoint": {
+    "protected": 84, "healthy": 82, "at_risk": 2, "at_risk_note": "LAP-014 · SRV-DB-02", "inactive": 2,
+    "meters": [
+      ["Real-time protection", 82, 84, "ok"],
+      ["Agent checking in", 82, 84, "ok"],
+      ["Signatures current", 84, 84, "ok"],
+      ["Tamper protection", 84, 84, "ok"]
+    ],
+    "inactive_agents": [
+      ["LAP-014", "Windows 11", "4 Jul 22:15 UTC", "34h"],
+      ["dev-nrm-01", "Ubuntu 22.04", "4 Jul 18:25 UTC", "38h"]
+    ]
+  },
+  "availability": {
+    "uptime": "99.98%", "sla": "99.9%", "outages": 0, "outages_note": "none recorded",
+    "maintenance": 1, "maint_note": "8 min · off-hours", "monitoring": "24 / 7"
+  }
+}
