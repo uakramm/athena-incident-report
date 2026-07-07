@@ -180,7 +180,7 @@ def _sec_head(eyebrow: str, title: str, src: str) -> str:
     )
 
 
-def _exec(d: Dict[str, Any]) -> str:
+def _exec(d: Dict[str, Any], n: int = 1) -> str:
     e = d["exec"]
     tiles = [
         _tile("blue", "Incidents opened", f'{e["opened"]:,}', e["opened_delta"]),
@@ -191,7 +191,7 @@ def _exec(d: Dict[str, Any]) -> str:
         _tile("green", "System availability", e["uptime"], e["uptime_note"], small=True),
     ]
     return (
-        "<section>" + _sec_head("01 · This week at a glance", "Executive summary", "") +
+        "<section>" + _sec_head(f"{n:02d} · This week at a glance", "Executive summary", "") +
         '<div class="tiles t6">' + "".join(tiles) + "</div>"
         '<p class="caption">Running totals across the full reporting week, not a snapshot. '
         "▲/▼ compare to the prior week; green marks the favorable direction.</p></section>"
@@ -236,7 +236,7 @@ def _inc_closed_rows(rows: Sequence[Dict[str, Any]], more: int) -> str:
     return "".join(out)
 
 
-def _incidents(d: Dict[str, Any]) -> str:
+def _incidents(d: Dict[str, Any], n: int = 2) -> str:
     sev_rows = [(lbl, val, SEV_CLASS[lbl]) for lbl, val in d["inc_severity"]]
     open_rows = _inc_open_rows(d["open_rows"])
     closed_rows = _inc_closed_rows(d["closed_rows"], d.get("closed_more", 0))
@@ -253,13 +253,14 @@ def _incidents(d: Dict[str, Any]) -> str:
             + _legend(sev_series) + lines_svg(d["sev_trend"], sev_series, "Severity over time") + "</div>"
         )
     return (
-        "<section>" + _sec_head("02 · Detection & response", "Incident management", d.get("inc_src", "Jira SECOPS · Security Alert + Security Incident")) +
+        "<section>" + _sec_head(f"{n:02d} · Detection & response", "Incident management", d.get("inc_src", "Jira SECOPS · Security Alert + Security Incident")) +
         '<div class="grid2">'
         '<div class="card"><p class="card-h">Opened by severity</p>'
-        f'<p class="caption" style="margin:2px 0 6px;">This week · {d["inc_total_opened"]:,} total</p>' + hbar_svg(sev_rows) + "</div>"
+        f'<p class="caption" style="margin:2px 0 6px;">This week · {sum(val for _, val in d["inc_severity"]):,} shown</p>'
+        f'<div class="chart-fill">{hbar_svg(sev_rows)}</div></div>'
         '<div class="card"><p class="card-h">Six-week trend</p>'
         '<p class="caption" style="margin:2px 0 6px;">Opened, closed &amp; still-open per week</p>'
-        + status_legend + lines_svg(d["trend"], status_series, "Opened, closed and open per week") + "</div></div>"
+        + status_legend + f'<div class="chart-fill">{lines_svg(d["trend"], status_series, "Opened, closed and open per week")}</div></div></div>'
         + sev_card +
         f'<p class="caption">{d.get("inc_summary_line", "")}</p>'
         f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Open — currently in handling ({len(d["open_rows"])})</h3>'
@@ -273,9 +274,9 @@ def _incidents(d: Dict[str, Any]) -> str:
     )
 
 
-def _device(d: Dict[str, Any]) -> str:
+def _device(d: Dict[str, Any], n: int = 3) -> str:
     dev = d.get("device")
-    head = _sec_head("03 · Managed estate", "Device management", "Microsoft Intune")
+    head = _sec_head(f"{n:02d} · Managed estate", "Device management", "Microsoft Intune")
     if not dev:
         return "<section>" + head + _pending("Intune") + "</section>"
     total = dev.get("total", dev.get("managed", 0))
@@ -297,9 +298,9 @@ def _device(d: Dict[str, Any]) -> str:
     )
 
 
-def _endpoint(d: Dict[str, Any]) -> str:
+def _endpoint(d: Dict[str, Any], n: int = 4) -> str:
     ep = d.get("endpoint")
-    head = _sec_head("04 · Endpoint protection", "Endpoint management", "Defender · Athena agent status")
+    head = _sec_head(f"{n:02d} · Endpoint protection", "Endpoint management", "Defender · Athena agent status")
     if not ep:
         return "<section>" + head + _pending("Defender / agent status") + "</section>"
     tiles = (
@@ -329,9 +330,9 @@ def _endpoint(d: Dict[str, Any]) -> str:
     )
 
 
-def _vuln(d: Dict[str, Any]) -> str:
+def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     v = d.get("vuln")
-    head = _sec_head("05 · Exposure", "Vulnerability status", "Athena scanning · Jira SECOPS · Vulnerability")
+    head = _sec_head(f"{n:02d} · Exposure", "Vulnerability status", "Athena scanning · Jira SECOPS · Vulnerability")
     if not v:
         return "<section>" + head + _pending("Athena scanning") + "</section>"
     tiles = (
@@ -347,7 +348,8 @@ def _vuln(d: Dict[str, Any]) -> str:
         "<section>" + head +
         '<div class="tiles t4" style="margin-bottom:16px;">' + tiles + "</div>"
         '<div class="grid2"><div class="card"><p class="card-h">Open vulnerabilities by severity</p>'
-        f'<p class="caption" style="margin:2px 0 6px;">{v["total_open"]:,} open across the estate</p>' + hbar_svg(sev_rows) + "</div>"
+        f'<p class="caption" style="margin:2px 0 6px;">{v["total_open"]:,} open across the estate</p>'
+        f'<div class="chart-fill">{hbar_svg(sev_rows)}</div></div>'
         '<div class="tbl-wrap"><div style="display:grid;grid-template-columns:1fr 1fr;">'
         f'<div class="cvebar crit">Top Critical CVEs · {v["crit_open"]:,} open</div>'
         f'<div class="cvebar high">Top High CVEs · {v["high_open"]:,} open</div></div>'
@@ -360,9 +362,9 @@ def _vuln(d: Dict[str, Any]) -> str:
     )
 
 
-def _availability(d: Dict[str, Any]) -> str:
+def _availability(d: Dict[str, Any], n: int = 6) -> str:
     a = d.get("availability")
-    head = _sec_head("06 · Service levels", "System availability", "Athena platform monitoring")
+    head = _sec_head(f"{n:02d} · Service levels", "System availability", "Athena platform monitoring")
     if not a:
         return "<section>" + head + _pending("platform monitoring") + "</section>"
     tiles = (
@@ -410,10 +412,23 @@ def render_report(data: Dict[str, Any], css: Optional[str] = None) -> str:
         '<div class="metaline"><span>Prepared by <b>Athena SOC Team</b></span>'
         f'<span>Generated <b>{esc(data["generated"])}</b> · Confidential</span></div>'
     )
-    body = (
-        note + band + _exec(data) + _incidents(data) + _device(data) +
-        _endpoint(data) + _vuln(data) + _availability(data) + _footer(data)
-    )
+    sections = data.get("_sections_enabled", {})
+    counter = {"n": 0}
+
+    def nxt() -> int:
+        counter["n"] += 1
+        return counter["n"]
+
+    body = note + band + _exec(data, nxt()) + _incidents(data, nxt())
+    if sections.get("device", True):
+        body += _device(data, nxt())
+    if sections.get("endpoint", True):
+        body += _endpoint(data, nxt())
+    if sections.get("vuln", True):
+        body += _vuln(data, nxt())
+    if sections.get("availability", True):
+        body += _availability(data, nxt())
+    body += _footer(data)
     return (
         "<title>Weekly Security Operations Report</title>\n"
         f"<style>{css}</style>\n<div class=\"wrap\">{body}</div>\n"

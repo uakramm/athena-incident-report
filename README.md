@@ -19,8 +19,8 @@ cp .env.example .env        # Jira site + token, plus per-client config
 ```
 
 `.env` holds credentials **and** per-client config (`JIRA_PROJECT_KEY`, `REPORT_CLIENT`,
-`REPORT_ENVIRONMENT`, `REPORT_TENANT`, `REPORT_SUPPORT_EMAIL`, `REPORT_WEEK_START`). Keep one file
-per client (`.env.neuro`, `.env.athena`, …) so a run is just:
+`REPORT_ENVIRONMENT`, `REPORT_TENANT`, `REPORT_SUPPORT_EMAIL`, `REPORT_WEEK_START`,
+`REPORT_INCIDENT_SEVERITIES`). Keep one file per client (`.env.neuro`, `.env.athena`, …) so a run is just:
 
 ```bash
 python generate_report.py --env-file .env.neuro --out reports/neuro-2026-07-05.html
@@ -96,6 +96,20 @@ The `Severity` field means different things per work type, so the two are mapped
 
 Because incident Medium and Low both use Sev-4, incidents show **Critical / High / Medium** (no separate
 Low); vulnerabilities show all four. The report logs the resolved mapping on each run.
+
+Set `REPORT_INCIDENT_SEVERITIES=CRITICAL,HIGH` to control which incident severities are included in
+incident totals, trends, MTTD / MTTR, and open / closed incident rows. The default is `CRITICAL,HIGH`.
+
+### Section enablement
+
+Use these env vars to include or omit non-core report sections:
+
+| Env var | Default |
+| --- | --- |
+| `REPORT_ENABLE_DEVICE_MANAGEMENT` | `true` |
+| `REPORT_ENABLE_ENDPOINT_MANAGEMENT` | `true` |
+| `REPORT_ENABLE_VULNERABILITY_STATUS` | `true` |
+| `REPORT_ENABLE_SYSTEM_AVAILABILITY` | `true` |
 
 ## Files
 

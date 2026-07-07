@@ -45,8 +45,14 @@ section { margin:0 0 28px; }
 .sec-head h2 { margin:0; font-size:18px; font-weight:680; letter-spacing:-0.01em; }
 .sec-head .src { margin-left:auto; font-size:11px; color:var(--muted); }
 
-.card { background:var(--paper); border:1px solid var(--line); border-radius:12px; padding:18px; box-shadow:var(--shadow); }
+.card { background:var(--paper); border:1px solid var(--line); border-radius:12px; padding:18px; box-shadow:var(--shadow);
+  display:flex; flex-direction:column; }
 .card-h { font-size:12.5px; font-weight:680; color:var(--ink); margin:0 0 2px; }
+/* Grid siblings stretch to equal height; a short chart (e.g. 2 severity rows)
+   would otherwise sit pinned to the top with dead space below it. This centers
+   the chart in whatever height the row ends up being, instead of resizing the
+   chart itself (which stays proportioned to its row count). */
+.chart-fill { flex:1; display:flex; flex-direction:column; justify-content:center; min-height:0; }
 .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
 .caption { color:var(--muted); font-size:12px; margin:12px 2px 0; }
 .caption b { color:var(--ink-2); }
