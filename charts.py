@@ -12,7 +12,7 @@ render_email's palette so the PNGs match the rest of the report.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Palette — kept in step with render_email.py
 INK, INK2, MUTED = "#1f2733", "#4b5563", "#8a92a0"
@@ -129,6 +129,21 @@ def _svg_height(rows_px: float) -> float:
     return _FIG_W * rows_px / _VBOX_W
 
 
+def _pt_for_display(target_px: float, display_w_px: float) -> float:
+    """Points that render at ~target_px when a _FIG_W-inch figure is shown at
+    display_w_px. Lets a full-width chart use a fixed on-screen text size (e.g. the
+    card header's 12.5px) instead of one that scales up with the card width."""
+    return target_px * (_FIG_W * 72.0) / display_w_px
+
+
+# The "Incidents by type" chart is a full-width card (~922px inside the 960px body),
+# so proportional SVG text would render ~20px. Size its labels/values to the card
+# header (12.5px) and its axis ticks to ~11px instead.
+_TYPE_DISPLAY_W = 922.0
+TYPE_LABEL_PT = _pt_for_display(12.5, _TYPE_DISPLAY_W)
+TYPE_TICK_PT = _pt_for_display(11.0, _TYPE_DISPLAY_W)
+
+
 def _rounded_barh(ax, fig, ys, widths, height, colors, round_frac=0.42):
     """Horizontal bars with rounded corners (SVG rx). round_frac is the corner
     radius as a fraction of bar height, matched to the SVG (rx 4 on a 20px bar)."""
@@ -155,9 +170,14 @@ def _rounded_barh(ax, fig, ys, widths, height, colors, round_frac=0.42):
 
 
 def _hbar(rows: Sequence[Tuple[str, int]], colors: Sequence[str],
-          rowh_px: float, barh_px: float) -> bytes:
+          rowh_px: float, barh_px: float, cat_pt: Optional[float] = None,
+          val_pt: Optional[float] = None, tick_pt: Optional[float] = None) -> bytes:
     """Horizontal bars matching hbar_svg/catbar_svg. rowh_px/barh_px are the SVG
-    row-height and bar-height so the figure aspect and bar thickness match."""
+    row-height and bar-height so the figure aspect and bar thickness match.
+    cat_pt/val_pt/tick_pt override the label/value/tick font size (points)."""
+    cat_pt = cat_pt or CAT_PT
+    val_pt = val_pt or VAL_PT
+    tick_pt = tick_pt or TICK_PT
     labels = [r[0] for r in rows]
     vals = [r[1] for r in rows]
     n = len(rows)
@@ -170,13 +190,13 @@ def _hbar(rows: Sequence[Tuple[str, int]], colors: Sequence[str],
     for t in ticks:
         ax.axvline(t, color=LINE, linewidth=GRID_LW, zorder=0)
     ax.set_xticks(ticks)
-    ax.set_xticklabels([_fmt_tick(t) for t in ticks], fontsize=TICK_PT, color=MUTED)
+    ax.set_xticklabels([_fmt_tick(t) for t in ticks], fontsize=tick_pt, color=MUTED)
     ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=CAT_PT, color=INK2)
+    ax.set_yticklabels(labels, fontsize=cat_pt, color=INK2)
     _rounded_barh(ax, fig, y, vals, barh_px / rowh_px, colors)
     for yi, v in zip(y, vals):
         ax.text(v + axis_max * 0.012, yi, f"{v:,}", va="center", ha="left",
-                fontsize=VAL_PT, fontweight="bold", color=INK)
+                fontsize=val_pt, fontweight="bold", color=INK)
     for s in ("top", "right", "bottom"):
         ax.spines[s].set_visible(False)
     ax.spines["left"].set_color(LINE_STRONG)         # SVG g-axis line
@@ -191,14 +211,21 @@ def _sev_bar(rows: Sequence[Tuple[str, int]]) -> bytes:
 
 
 def _type_bar(rows: Sequence[Tuple[str, int]]) -> bytes:
-    return _hbar(rows, [BRAND] * len(rows), rowh_px=32, barh_px=18)  # catbar_svg spec
+    # Full-width card: fix the label/value text to the header size (12.5px) rather
+    # than letting it scale up with the card width.
+    return _hbar(rows, [BRAND] * len(rows), rowh_px=32, barh_px=18,
+                 cat_pt=TYPE_LABEL_PT, val_pt=TYPE_LABEL_PT, tick_pt=TYPE_TICK_PT)
 
 
-def _line_chart(weeks: Sequence[Dict[str, Any]], series: Sequence[Tuple[str, str]]) -> bytes:
+def _line_chart(weeks: Sequence[Dict[str, Any]], series: Sequence[Tuple[str, str]],
+                tick_pt: Optional[float] = None, end_pt: Optional[float] = None) -> bytes:
     """Multi-line week chart matching lines_svg (viewBox 560x232): clean lines with
     no midpoint markers, an end dot with white ring, a bold colour-matched end value,
     faint y gridlines. Legend is rendered as HTML in the card (like the report), not
-    baked into the image. series = [(data_key, colour), ...]."""
+    baked into the image. series = [(data_key, colour), ...]. tick_pt/end_pt override
+    the axis/week-label and end-value font size (points)."""
+    tick_pt = tick_pt or TICK_PT
+    end_pt = end_pt or END_PT
     fig, ax = _new_ax(_FIG_W, _svg_height(232))
     n = len(weeks)
     x = list(range(n))
@@ -211,14 +238,14 @@ def _line_chart(weeks: Sequence[Dict[str, Any]], series: Sequence[Tuple[str, str
         ax.plot([x[-1]], [ys[-1]], marker="o", markersize=DOT_MS, markerfacecolor=color,
                 markeredgecolor="#ffffff", markeredgewidth=GRID_LW * 1.4, zorder=4)
         ax.annotate(f"{ys[-1]:,}", (x[-1], ys[-1]), textcoords="offset points",
-                    xytext=(7, 0), va="center", ha="left", fontsize=END_PT,
+                    xytext=(7, 0), va="center", ha="left", fontsize=end_pt,
                     fontweight="bold", color=color, annotation_clip=False)
     ax.set_ylim(0, axis_max)
     ax.set_yticks(ticks)
-    ax.set_yticklabels([_fmt_tick(t) for t in ticks], fontsize=TICK_PT, color=MUTED)
+    ax.set_yticklabels([_fmt_tick(t) for t in ticks], fontsize=tick_pt, color=MUTED)
     ax.set_xlim(-0.15, n - 1 + 0.55)
     ax.set_xticks(x)
-    ax.set_xticklabels([w["label"] for w in weeks], fontsize=TICK_PT, color=MUTED)
+    ax.set_xticklabels([w["label"] for w in weeks], fontsize=tick_pt, color=MUTED)
     for t in ticks:
         ax.axhline(t, color=LINE, linewidth=GRID_LW, zorder=0)
     for s in ax.spines.values():
@@ -228,6 +255,7 @@ def _line_chart(weeks: Sequence[Dict[str, Any]], series: Sequence[Tuple[str, str
 
 
 def _trend(weeks: Sequence[Dict[str, Any]]) -> bytes:
+    # Half-width card (side by side with the severity bars): proportional SVG sizing.
     return _line_chart(weeks, [("opened", STATUS["Opened"]),
                                ("closed", STATUS["Closed"]),
                                ("open", STATUS["Open at week end"])])
@@ -235,7 +263,10 @@ def _trend(weeks: Sequence[Dict[str, Any]]) -> bytes:
 
 def _multiline(weeks: Sequence[Dict[str, Any]], labels: Sequence[str],
                colors: Sequence[str]) -> bytes:
-    return _line_chart(weeks, [(lab, c) for lab, c in zip(labels, colors)])
+    # Full-width card ("Severity over time"): fix axis/week labels and end values to
+    # the header size (12.5px) rather than letting them scale up with the card width.
+    return _line_chart(weeks, [(lab, c) for lab, c in zip(labels, colors)],
+                       tick_pt=TYPE_LABEL_PT, end_pt=TYPE_LABEL_PT)
 
 
 def build_charts(data: Dict[str, Any]) -> Dict[str, bytes]:

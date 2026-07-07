@@ -40,8 +40,9 @@ TILE = {  # (background, border, number-colour)
     "": (PAPER, LINE, INK),
 }
 
-FONT = "font-family:Segoe UI,Helvetica,Arial,sans-serif;"
+FONT = "font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
 TRACK = "#eef0f4"
+SHADOW = "0 1px 2px rgba(31,39,51,0.04), 0 4px 16px rgba(31,39,51,0.06)"
 
 
 def _inline(html_str: str) -> str:
@@ -117,14 +118,16 @@ def _sla_rows(rows: Sequence[Sequence[Any]]) -> str:
     return "".join(out)
 
 
-def _card(title: str, caption: str, body: str, top: int = 0) -> str:
+def _card(title: str, caption: str, body: str, top: int = 0, height: Optional[int] = None) -> str:
     cap = (f'<div style="{FONT}font-size:12px;color:{MUTED};padding:0 0 10px;">{caption}</div>'
            if caption else "")
+    table_height = f' height="{height}"' if height else ""
+    td_height = f'height:{height}px;' if height else ""
     return (
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
-        f'style="margin-top:{top}px;"><tr><td bgcolor="{PAPER}" '
-        f'style="border:1px solid {LINE};border-radius:10px;padding:16px 18px;">'
-        f'<div style="{FONT}font-size:12.5px;font-weight:bold;color:{INK};padding:0 0 4px;">{esc(title)}</div>'
+        f'<table role="presentation" width="100%"{table_height} cellpadding="0" cellspacing="0" border="0" '
+        f'style="margin-top:{top}px;{td_height}"><tr><td bgcolor="{PAPER}" '
+        f'style="border:1px solid {LINE};border-radius:12px;padding:18px;box-shadow:{SHADOW};{td_height}" valign="top">'
+        f'<div style="{FONT}font-size:12.5px;font-weight:680;color:{INK};padding:0 0 4px;">{esc(title)}</div>'
         f"{cap}{body}</td></tr></table>"
     )
 
@@ -133,7 +136,7 @@ def _two_col(left: str, right: str, top: int = 16) -> str:
     """Two equal cards side by side — the email-safe equivalent of the HTML .grid2."""
     return (
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
-        f'style="margin-top:{top}px;"><tr>'
+        f'style="margin-top:{top}px;table-layout:fixed;"><tr>'
         f'<td width="50%" valign="top" style="padding-right:8px;">{left}</td>'
         f'<td width="50%" valign="top" style="padding-left:8px;">{right}</td>'
         f'</tr></table>'
@@ -153,27 +156,28 @@ def _sec_head(eyebrow: str, title: str, src: str) -> str:
     )
 
 
-def _tile(kind: str, label: str, num: str, delta_html: str) -> str:
+def _tile(kind: str, label: str, num: str, delta_html: str, small: bool = False) -> str:
     """Returns the tile card (no outer <td>); _tile_grid places it in a sized cell."""
     bg, bd, ink = TILE.get(kind, TILE[""])
+    num_size = 22 if small else 28
     return (
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" height="100%">'
-        f'<tr><td bgcolor="{bg}" valign="top" style="border:1px solid {bd};border-radius:10px;padding:12px 14px;">'
-        f'<div style="{FONT}font-size:10px;letter-spacing:0.5px;text-transform:uppercase;font-weight:bold;color:{MUTED};">{esc(label)}</div>'
-        f'<div style="{FONT}font-size:24px;font-weight:bold;color:{ink};padding-top:4px;">{esc(num)}</div>'
-        f'<div style="{FONT}font-size:11px;color:{MUTED};padding-top:5px;">{_inline(delta_html)}</div>'
+        f'<tr><td bgcolor="{bg}" valign="top" style="border:1px solid {bd};border-radius:12px;padding:14px 15px;box-shadow:{SHADOW};">'
+        f'<div style="{FONT}font-size:10.5px;letter-spacing:0.05em;text-transform:uppercase;font-weight:700;color:{MUTED};">{esc(label)}</div>'
+        f'<div style="{FONT}font-size:{num_size}px;line-height:1;font-weight:750;color:{ink};padding-top:5px;">{esc(num)}</div>'
+        f'<div style="{FONT}font-size:11.5px;color:{MUTED};padding-top:7px;">{_inline(delta_html)}</div>'
         f'</td></tr></table>'
     )
 
 
 def _tile_grid(tiles: Sequence[str], per_row: int = 3) -> str:
     w = round(100 / per_row, 2)
-    out = ['<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">']
+    out = ['<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="table-layout:fixed;">']
     for i in range(0, len(tiles), per_row):
         row = tiles[i:i + per_row]
-        cells = "".join(f'<td width="{w}%" valign="top" style="padding:5px;">{t}</td>' for t in row)
+        cells = "".join(f'<td width="{w}%" valign="top" style="padding:6px;">{t}</td>' for t in row)
         # Pad the last row so cells keep their width.
-        cells += "".join(f'<td width="{w}%" style="padding:5px;"></td>' for _ in range(per_row - len(row)))
+        cells += "".join(f'<td width="{w}%" style="padding:6px;"></td>' for _ in range(per_row - len(row)))
         out.append("<tr>" + cells + "</tr>")
     out.append("</table>")
     return "".join(out)
@@ -299,35 +303,35 @@ def _pill(sev: str, label: str) -> str:
 def _band(d: Dict[str, Any]) -> str:
     return (
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{BRAND}" '
-        f'style="border-radius:10px 10px 0 0;"><tr><td align="center" style="padding:24px;">'
-        f'<div style="{FONT}font-size:11px;letter-spacing:2px;text-transform:uppercase;color:{BRAND_SUB};font-weight:bold;">Athena Security Group &middot; Managed Detection &amp; Response</div>'
-        f'<div style="{FONT}font-size:24px;font-weight:bold;color:{BRAND_INK};padding-top:8px;">Weekly Security Operations Report</div>'
+        f'style="border-radius:12px 12px 0 0;"><tr><td align="center" style="padding:26px 24px 24px;">'
+        f'<div style="{FONT}font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:{BRAND_SUB};font-weight:600;">Athena Security Group &middot; Managed Detection &amp; Response</div>'
+        f'<div style="{FONT}font-size:26px;font-weight:700;color:{BRAND_INK};padding-top:10px;">Weekly Security Operations Report</div>'
         f'<div style="{FONT}font-size:13px;color:{BRAND_SUB};padding-top:8px;"><b style="color:{BRAND_INK};">{esc(d["client"])}</b> &middot; {esc(d["environment"])} &middot; Tenant: {esc(d["tenant"])}</div>'
         f'<div style="{FONT}font-size:13px;color:{BRAND_SUB};padding-top:2px;">Reporting period: <b style="color:{BRAND_INK};">{esc(d["period_label"])}</b> &middot; week starts {esc(d["week_start"])}</div>'
         f'</td></tr></table>'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAPER}" '
-        f'style="border:1px solid {LINE};border-top:none;border-radius:0 0 10px 10px;"><tr>'
+        f'style="border:1px solid {LINE};border-top:none;border-radius:0 0 12px 12px;box-shadow:{SHADOW};"><tr>'
         f'<td style="{FONT}font-size:11.5px;color:{MUTED};padding:9px 16px;">Prepared by <b style="color:{INK2};">Athena SOC Team</b></td>'
         f'<td align="right" style="{FONT}font-size:11.5px;color:{MUTED};padding:9px 16px;">Generated <b style="color:{INK2};">{esc(d["generated"])}</b> &middot; Confidential</td>'
         f'</tr></table>'
     )
 
 
-def _exec(d: Dict[str, Any]) -> str:
+def _exec(d: Dict[str, Any], n: int = 1) -> str:
     e = d["exec"]
     tiles = [
         _tile("blue", "Incidents opened", f'{e["opened"]:,}', e["opened_delta"]),
         _tile("green", "Incidents closed", f'{e["closed"]:,}', e["closed_delta"]),
         _tile("red", "Open at week end", f'{e["open"]:,}', e["open_delta"]),
-        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"]),
-        _tile("", "Mean time to resolve", e["mttr"], e["mttr_delta"]),
-        _tile("green", "System availability", e["uptime"], e["uptime_note"]),
+        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True),
+        _tile("", "Mean time to resolve", e["mttr"], e["mttr_delta"], small=True),
+        _tile("green", "System availability", e["uptime"], e["uptime_note"], small=True),
     ]
     return (
-        _sec_head("01 · This week at a glance", "Executive summary", "")
+        _sec_head(f"{n:02d} · This week at a glance", "Executive summary", "")
         + _tile_grid(tiles, 6)
         + f'<div style="{FONT}font-size:12px;color:{MUTED};padding:10px 2px 0;">Running totals across the full '
-          "reporting week, not a snapshot. &#9650;/&#9660; compare to the prior week.</div>"
+          "reporting week, not a snapshot. &#9650;/&#9660; compare to the prior week; green marks the favorable direction.</div>"
     )
 
 
@@ -403,8 +407,8 @@ def _sub_head(text: str) -> str:
     return f'<div style="{FONT}font-size:13px;font-weight:bold;color:{INK};padding:18px 0 8px;">{esc(text)}</div>'
 
 
-def _incidents(d: Dict[str, Any]) -> str:
-    parts = [_sec_head("02 · Detection &amp; response", "Incident management",
+def _incidents(d: Dict[str, Any], n: int = 2) -> str:
+    parts = [_sec_head(f"{n:02d} · Detection & response", "Incident management",
                        d.get("inc_src", "Jira SECOPS · Security Alert + Security Incident"))]
 
     sev_rows = [(lbl, val, SEV_FILL[lbl]) for lbl, val in d["inc_severity"]]
@@ -499,9 +503,9 @@ def _pending(source: str) -> str:
             "<b>--supplemental</b> to include this section.</td></tr></table>")
 
 
-def _device(d: Dict[str, Any]) -> str:
+def _device(d: Dict[str, Any], n: int = 3) -> str:
     dev = d.get("device")
-    head = _sec_head("03 · Managed estate", "Device management", "Microsoft Intune")
+    head = _sec_head(f"{n:02d} · Managed estate", "Device management", "Microsoft Intune")
     if not dev:
         return head + _pending("Intune")
     total = dev.get("total", dev.get("managed", 0))
@@ -518,9 +522,9 @@ def _device(d: Dict[str, Any]) -> str:
     return head + _tile_grid(tiles, 4) + _card("Policies, definitions &amp; deployment", "", body, top=12)
 
 
-def _endpoint(d: Dict[str, Any]) -> str:
+def _endpoint(d: Dict[str, Any], n: int = 4) -> str:
     ep = d.get("endpoint")
-    head = _sec_head("04 · Endpoint protection", "Endpoint management", "Defender · Athena agent status")
+    head = _sec_head(f"{n:02d} · Endpoint protection", "Endpoint management", "Defender · Athena agent status")
     if not ep:
         return head + _pending("Defender / agent status")
     tiles = [
@@ -532,9 +536,9 @@ def _endpoint(d: Dict[str, Any]) -> str:
     return head + _tile_grid(tiles, 4) + _card("Protection coverage", "", _meter_rows(ep.get("meters", [])), top=12)
 
 
-def _vuln(d: Dict[str, Any]) -> str:
+def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     v = d.get("vuln")
-    head = _sec_head("05 · Exposure", "Vulnerability status", "Athena scanning · Jira SECOPS · Vulnerability")
+    head = _sec_head(f"{n:02d} · Exposure", "Vulnerability status", "Athena scanning · Jira SECOPS · Vulnerability")
     if not v:
         return head + _pending("Athena scanning")
     tiles = [
@@ -546,27 +550,66 @@ def _vuln(d: Dict[str, Any]) -> str:
     parts = [head, _tile_grid(tiles, 4)]
     sev_rows = [(lbl, val, SEV_FILL[lbl]) for lbl, val in v["severity"]]
     v_sev_body = _chart_img(d, "vuln_severity", "Open vulnerabilities by severity") or _bar_rows(sev_rows)
-    v_sev_card = _card("Open vulnerabilities by severity", f'{v["total_open"]:,} open across the estate',
-                       v_sev_body)
-    # top CVEs
-    def cve_list(title: str, tint: str, items: Sequence[Sequence[Any]]) -> str:
-        rows = "".join(
-            f'<tr><td style="{FONT}font-size:12px;padding:7px 12px;border-bottom:1px solid {LINE};">'
-            f'<a href="{esc(u)}" style="color:{LINK};text-decoration:none;">{esc(c)}</a></td>'
-            f'<td align="right" style="{FONT}font-size:12px;font-weight:bold;color:{tint};padding:7px 12px;border-bottom:1px solid {LINE};">{esc(x)}</td></tr>'
-            for c, u, x in items
-        )
-        return (f'<td width="50%" valign="top" style="padding:0 6px;">'
-                f'<div style="{FONT}font-size:11.5px;font-weight:bold;color:#fff;background:{tint};padding:8px 12px;border-radius:6px 6px 0 0;">{title}</div>'
-                f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAPER}" '
-                f'style="border:1px solid {LINE};border-top:none;border-collapse:collapse;">{rows}</table></td>')
-    cve_card = (
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>'
-        + cve_list(f'Top Critical CVEs &middot; {v["crit_open"]:,} open', SEV_FILL["Critical"], v.get("top_crit", []))
-        + cve_list(f'Top High CVEs &middot; {v["high_open"]:,} open', SEV_FILL["High"], v.get("top_high", []))
-        + "</tr></table>"
+    crit_items = list(v.get("top_crit", []))
+    high_items = list(v.get("top_high", []))
+    HDR_H, ROW_H = 34, 37
+
+    # The two cards are the CELLS of a single table row, so they are forced to equal
+    # height by the table itself — no pixel estimation, no height:100% (which Outlook
+    # strips). The taller card sets the row height; the shorter one's cell fills the
+    # rest with its paper background. Widths are explicit (fixed 960px body): the
+    # section is 960 → 472 + 16 gutter + 472.
+    sev_inner = (
+        f'<div style="{FONT}font-size:12.5px;font-weight:680;color:{INK};">Open vulnerabilities by severity</div>'
+        f'<div style="{FONT}font-size:12px;color:{MUTED};padding-top:2px;">{v["total_open"]:,} open across the estate</div>'
+        f'<div style="padding-top:12px;">{v_sev_body}</div>'
     )
-    parts.append(_two_col(v_sev_card, cve_card, top=12))
+
+    def cve_rows(items: Sequence[Sequence[Any]], tint: str) -> str:
+        rows = []
+        last = len(items) - 1
+        for i, (name, url, val) in enumerate(items):
+            bb = "" if i == last else f"border-bottom:1px solid {LINE};"
+            rows.append(
+                f'<tr><td nowrap="nowrap" height="{ROW_H}" style="{FONT}font-size:12.5px;color:{INK2};'
+                f'padding:0 14px;line-height:{ROW_H}px;height:{ROW_H}px;{bb}white-space:nowrap;">'
+                f'<a href="{esc(url)}" style="color:{LINK};text-decoration:none;white-space:nowrap;">{esc(name)}</a></td>'
+                f'<td nowrap="nowrap" align="right" height="{ROW_H}" style="{FONT}font-size:12.5px;font-weight:bold;'
+                f'color:{tint};padding:0 14px;line-height:{ROW_H}px;height:{ROW_H}px;{bb}white-space:nowrap;">{esc(val)}</td></tr>'
+            )
+        return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+                f'style="border-collapse:collapse;">{"".join(rows)}</table>')
+
+    crit_title = f'Top Critical CVEs &middot; {v["crit_open"]:,} open'
+    high_title = f'Top High CVEs &middot; {v["high_open"]:,} open'
+    cve_hdr = (f'{FONT}font-size:11.5px;font-weight:bold;color:#fff;padding:0 14px;white-space:nowrap;'
+               f'letter-spacing:0.01em;line-height:{HDR_H}px;height:{HDR_H}px;')
+    # Inner CVE table fills its card cell; body cells valign top so rows sit under the
+    # coloured headers and the paper background fills any slack below.
+    cve_inner = (
+        f'<table role="presentation" width="100%" height="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="height:100%;border-collapse:separate;table-layout:fixed;">'
+        f'<tr>'
+        f'<td width="50%" height="{HDR_H}" style="{cve_hdr}background:{SEV_FILL["Critical"]};border-radius:12px 0 0 0;">{crit_title}</td>'
+        f'<td width="50%" height="{HDR_H}" style="{cve_hdr}background:{SEV_FILL["High"]};border-radius:0 12px 0 0;">{high_title}</td>'
+        f'</tr>'
+        f'<tr>'
+        f'<td width="50%" valign="top" bgcolor="{PAPER}">{cve_rows(crit_items, SEV_FILL["Critical"])}</td>'
+        f'<td width="50%" valign="top" bgcolor="{PAPER}" style="border-left:1px solid {LINE};">{cve_rows(high_items, SEV_FILL["High"])}</td>'
+        f'</tr></table>'
+    )
+
+    card_td = (f'valign="top" bgcolor="{PAPER}" style="border:1px solid {LINE};border-radius:12px;'
+               f'box-shadow:{SHADOW};')
+    vuln_row = (
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="margin-top:12px;table-layout:fixed;"><tr>'
+        f'<td width="472" {card_td}padding:18px;">{sev_inner}</td>'
+        f'<td width="16" style="width:16px;font-size:0;line-height:0;">&nbsp;</td>'
+        f'<td width="472" {card_td}padding:0;overflow:hidden;">{cve_inner}</td>'
+        f'</tr></table>'
+    )
+    parts.append(vuln_row)
     sla = v.get("sla")
     if sla and sla.get("rows"):
         ov = sla.get("overall")
@@ -583,37 +626,44 @@ def _vuln(d: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _availability(d: Dict[str, Any]) -> str:
+def _availability(d: Dict[str, Any], n: int = 6) -> str:
     a = d.get("availability")
-    head = _sec_head("06 · Service levels", "System availability", "Athena platform monitoring")
+    head = _sec_head(f"{n:02d} · Service levels", "System availability", "Athena platform monitoring")
     if not a:
         return head + _pending("platform monitoring")
     tiles = [
-        _tile("green", "Uptime this week", a["uptime"], f'SLA target {esc(a.get("sla", ""))}'),
-        _tile("", "Unplanned outages", f'{a["outages"]:,}', a.get("outages_note", "none recorded")),
-        _tile("", "Planned maintenance", str(a.get("maintenance", 0)), a.get("maint_note", "")),
+        _tile("green", "Uptime this week", a["uptime"], f'SLA target {esc(a.get("sla", ""))}', small=True),
+        _tile("", "Unplanned outages", f'{a["outages"]:,}', a.get("outages_note", "none recorded"), small=True),
+        _tile("", "Planned maintenance", str(a.get("maintenance", 0)), a.get("maint_note", ""), small=True),
+        _tile("blue", "Monitoring", a.get("monitoring", "24 / 7"), "continuous", small=True),
     ]
-    return head + _tile_grid(tiles, 3)
+    return head + _tile_grid(tiles, 4)
 
 
 def _footer(d: Dict[str, Any]) -> str:
     email = d.get("support_email", "")
     defs = [
-        "<b>MTTD</b> — Mean time to detect: event occurrence to the work item being raised.",
+        "<b>MTTD</b> — Mean time to detect: event occurrence (Incident Time) to the work item being raised.",
         "<b>MTTR</b> — Mean time to resolve: work item raised to Resolved / Closed.",
-        "<b>Severity</b> — from the Jira Sev-1…Sev-4 field, mapped per the platform's classification.",
-        "<b>Reporting period</b> — one week; start day configurable (Monday or Sunday).",
+        "<b>Severity</b> — from the Jira Sev-1…Sev-4 field, mapped per the platform's severity classification.",
+        "<b>Reporting period</b> — one week.",
     ]
-    defs_html = "".join(
-        f'<div style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:2px 0;">{x}</div>' for x in defs
+    defs_html = (
+        '<tr>'
+        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 18px 6px 2px;">{defs[0]}</td>'
+        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 2px 6px 18px;">{defs[1]}</td>'
+        '</tr><tr>'
+        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 18px 0 2px;">{defs[2]}</td>'
+        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 2px 0 18px;">{defs[3]}</td>'
+        '</tr>'
     )
     return (
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:24px;border-top:1px solid {LINE};">'
-        f'<tr><td style="padding:16px 2px 10px;">{defs_html}</td></tr></table>'
+        f'<tr><td style="padding:16px 0 10px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="table-layout:fixed;">{defs_html}</table></td></tr></table>'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PANEL}" '
-        f'style="border:1px solid {LINE};border-radius:8px;"><tr><td align="center" style="padding:14px;">'
+        f'style="border:1px solid {LINE};border-radius:10px;"><tr><td align="center" style="padding:14px;">'
         f'<div style="{FONT}font-size:12.5px;font-weight:bold;color:{INK};">Athena Security Group</div>'
-        f'<div style="{FONT}font-size:12px;color:{MUTED};padding:5px 0 8px;">&#9993; <a href="mailto:{esc(email)}" style="color:{LINK};text-decoration:none;">{esc(email)}</a></div>'
+        f'<div style="{FONT}font-size:12px;color:{MUTED};padding:5px 0 8px;">🌐 <a href="#" style="color:{LINK};text-decoration:none;">Website</a> &nbsp;|&nbsp; 📄 <a href="#" style="color:{LINK};text-decoration:none;">Docs</a> &nbsp;|&nbsp; ✉️ <a href="mailto:{esc(email)}" style="color:{LINK};text-decoration:none;">{esc(email)}</a></div>'
         f'<div style="{FONT}font-size:11px;color:{MUTED};">Prepared by the Athena SOC team &middot; Confidential — for the named client only &middot; Do not reply to this report.</div>'
         f'</td></tr></table>'
     )
@@ -621,15 +671,21 @@ def _footer(d: Dict[str, Any]) -> str:
 
 def render_email(data: Dict[str, Any]) -> str:
     sections = data.get("_sections_enabled", {})
-    body = [_band(data), _exec(data), _commentary(data), _incidents(data)]
+    counter = {"n": 0}
+
+    def nxt() -> int:
+        counter["n"] += 1
+        return counter["n"]
+
+    body = [_band(data), _exec(data, nxt()), _commentary(data), _incidents(data, nxt())]
     if sections.get("device", True):
-        body.append(_device(data))
+        body.append(_device(data, nxt()))
     if sections.get("endpoint", True):
-        body.append(_endpoint(data))
+        body.append(_endpoint(data, nxt()))
     if sections.get("vuln", True):
-        body.append(_vuln(data))
+        body.append(_vuln(data, nxt()))
     if sections.get("availability", True):
-        body.append(_availability(data))
+        body.append(_availability(data, nxt()))
     body.append(_footer(data))
     inner = "".join(body)
     return (
@@ -638,7 +694,7 @@ def render_email(data: Dict[str, Any]) -> str:
         "<title>Weekly Security Operations Report</title></head>"
         f'<body style="margin:0;padding:0;background:{PAGE};">'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAGE}"><tr>'
-        '<td align="center" style="padding:20px 12px;">'
+        '<td align="center" style="padding:24px 18px 64px;">'
         '<table role="presentation" width="960" cellpadding="0" cellspacing="0" border="0" style="width:960px;max-width:960px;">'
         f'<tr><td>{inner}</td></tr></table>'
         "</td></tr></table></body></html>"
