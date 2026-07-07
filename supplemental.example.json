@@ -1,5 +1,6 @@
 {
-  "_comment": "Device / endpoint / availability data is NOT in Jira. Provide it here (from Intune, Defender/agent status, and platform monitoring) and pass with --supplemental. Omit any section to show a 'provided separately' placeholder. Meter rows are [label, achieved, total, kind] where kind is one of ok|warn|bad|blue.",
+  "_comment": "Device / endpoint / availability data is NOT in Jira. Provide it here (from Intune, Defender/agent status, and platform monitoring) and pass with --supplemental. Omit any section to show a 'provided separately' placeholder. Meter rows are [label, achieved, total, kind] where kind is one of ok|warn|bad|blue. 'commentary' is the analyst's written read on the week, shown under the executive summary; wrap paragraphs in <p>…</p> and use <b> for emphasis.",
+  "commentary": "<p>A steadier week overall. Alert volume rose on the back of a phishing wave targeting finance mailboxes — all quarantined at the gateway, none reached inboxes.</p><p>The one item worth your attention: <b>NSO-4821</b>, outbound C2 beaconing blocked at the WAF. The affected host is isolated and under review; no data movement was observed.</p>",
   "device": {
     "total": 87, "enrolled": 84, "outstanding": 3, "compliant": 79, "win": 61, "mac": 23,
     "meters": [

@@ -6,7 +6,11 @@ It pulls incident and vulnerability data from a client's **SECOPS Jira project**
 in the Athena report style, combining:
 
 - **Incident management** — Security Alert + Security Incident work items: opened / closed / still-open,
-  severity (Sev-1…Sev-4), a 6-week trend, **MTTD / MTTR**, and the open + closed queues.
+  severity (Sev-1…Sev-4), a 6-week trend, **MTTD / MTTR**, a **by-type breakdown**, **response-SLA
+  attainment** by severity, and the open + closed queues.
+- **Analyst commentary** — a short written read on the week (the SOC team's value narrative), shown under
+  the executive summary. **Auto-generated** from the week's metrics by default; set `REPORT_COMMENTARY_AUTO=false`
+  to omit, or override the wording via the `commentary` key in `--supplemental` (or `REPORT_COMMENTARY`).
 - **Vulnerability status** — Vulnerability work items: open by severity, resolved vs newly-detected, top CVEs.
 - **Device / endpoint / availability** — not in Jira; supplied via `--supplemental` (Intune / Defender / monitoring).
 
@@ -75,8 +79,21 @@ page breaks and margins for a clean print.
 ### Jira field mapping (override if your names differ)
 
 `--severity-field "Severity"` (Sev-1…4 → Critical/High/Medium/Low) · `--mttr-field "MTTR (Minutes)"` ·
-`--mttd-field "MTTD (Minutes)"` · `--incident-time-field "Incident Time"` · `--vuln-id-field "Vulnerability ID(s)"` ·
+`--mttd-field "MTTD (Minutes)"` · `--incident-time-field "Incident Time"` ·
+`--incident-type-field "Type of Incident"` (drives the by-type breakdown) · `--vuln-id-field "Vulnerability ID(s)"` ·
 `--source-field components` (`components`, `labels`, or a custom field name).
+
+### Response SLA targets
+
+The **Response SLA attainment** card shows the share of incidents resolved within a per-severity target
+time. Targets are set in minutes (defaults: Critical 240, High 480, Medium 1440, Low 4320):
+
+| Env var | Default (minutes) |
+| --- | --- |
+| `REPORT_SLA_CRITICAL_MINUTES` | `240` |
+| `REPORT_SLA_HIGH_MINUTES` | `480` |
+| `REPORT_SLA_MEDIUM_MINUTES` | `1440` |
+| `REPORT_SLA_LOW_MINUTES` | `4320` |
 
 **MTTD / MTTR** are read from the `MTTD (Minutes)` / `MTTR (Minutes)` number fields (unit `minutes`, the
 default). If a value is empty the script falls back to timestamps (`resolved − created` for MTTR,

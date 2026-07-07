@@ -57,6 +57,15 @@ section { margin:0 0 28px; }
 .caption { color:var(--muted); font-size:12px; margin:12px 2px 0; }
 .caption b { color:var(--ink-2); }
 
+.comment { background:var(--paper); border:1px solid var(--line); border-left:4px solid var(--brand);
+  border-radius:12px; padding:16px 20px; box-shadow:var(--shadow); }
+.comment-h { display:flex; align-items:baseline; gap:12px; margin-bottom:6px; }
+.comment-h h3 { margin:0; font-size:15px; font-weight:680; letter-spacing:-0.01em; }
+.comment-body { color:var(--ink-2); font-size:13px; line-height:1.6; }
+.comment-body p { margin:0 0 8px; }
+.comment-body p:last-child { margin-bottom:0; }
+.comment-body b { color:var(--ink); font-weight:650; }
+
 .tiles { display:grid; gap:12px; }
 .t6 { grid-template-columns:repeat(6,1fr); }
 .t5 { grid-template-columns:repeat(5,1fr); }
@@ -97,9 +106,22 @@ svg { display:block; width:100%; height:auto; }
 .meter-row{ display:flex; align-items:center; gap:12px; margin:11px 0; }
 .meter-row .ml{ width:150px; font-size:12.5px; color:var(--ink-2); font-weight:550; }
 .track{ flex:1; height:9px; border-radius:6px; background:var(--panel); overflow:hidden; border:1px solid var(--line); }
-.fill{ height:100%; border-radius:6px; background:var(--good); }
+.fill{ display:block; height:100%; border-radius:6px; background:var(--good); }
 .fill.warn{ background:var(--high); } .fill.bad{ background:var(--crit); } .fill.blue{ background:var(--brand); }
 .mv{ width:74px; text-align:right; font-size:12.5px; font-weight:700; font-variant-numeric:tabular-nums; }
+
+/* SLA attainment rows — the % is the headline, colour-coded pass/fail. */
+.sla-row{ display:flex; align-items:center; gap:12px; margin:13px 0; }
+.sla-lab{ width:132px; font-size:12.5px; color:var(--ink-2); font-weight:600; }
+.sla-track{ flex:1; height:14px; border-radius:7px; background:var(--panel); border:1px solid var(--line); overflow:hidden; }
+.sla-fill{ display:block; height:100%; border-radius:7px 0 0 7px; min-width:2px; }
+.sla-fill.ok{ background:var(--good); } .sla-fill.warn{ background:var(--high); }
+.sla-fill.bad{ background:var(--crit); } .sla-fill.blue{ background:var(--brand); }
+.sla-pct{ width:46px; text-align:right; font-size:14px; font-weight:800; font-variant-numeric:tabular-nums; }
+.sla-pct.ok{ color:var(--good-ink); } .sla-pct.warn{ color:var(--high-ink); }
+.sla-pct.bad{ color:var(--crit-ink); } .sla-pct.blue{ color:var(--brand); }
+.sla-cnt{ width:64px; text-align:right; font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.txt-ok{ color:var(--good-ink); } .txt-warn{ color:var(--high-ink); } .txt-bad{ color:var(--crit-ink); }
 
 .tbl-wrap{ overflow-x:auto; border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); background:var(--paper); }
 table{ width:100%; border-collapse:collapse; font-size:12.5px; min-width:640px; }

@@ -92,6 +92,61 @@ def hbar_svg(rows: Sequence[Tuple[str, int, str]]) -> str:
     return "".join(parts)
 
 
+def _ellipsize(text: Any, max_chars: int) -> str:
+    """Trim over-long category labels so they never spill past the chart gutter."""
+    s = str(text)
+    return s if len(s) <= max_chars else s[: max_chars - 1].rstrip() + "…"
+
+
+def catbar_svg(rows: Sequence[Tuple[str, int]], color: str = "var(--brand)") -> str:
+    """Categorical horizontal bars in a single accent colour. rows = [(label, value), ...].
+
+    The label gutter (0..x0) is wide because 'Type of Incident' values can be long
+    (e.g. 'Attempted Administrator Privilege Gain'); anything past ~38 chars is
+    ellipsized, with the full text kept in a <title> for hover/accessibility.
+    """
+    x0, x1 = 280.0, 545.0
+    lab_x = x0 - 12
+    max_label = 38
+    span = x1 - x0
+    top, rowh, barh = 12, 32, 18
+    n = len(rows)
+    grid_y2 = 20 + (n - 1) * rowh + barh + 10
+    ticks_y = grid_y2 + 18
+    svg_h = ticks_y + 12
+    max_val = max((v for _, v in rows), default=1)
+    axis_max, ticks = _axis_max(max_val, 3)
+
+    def tx(v: float) -> float:
+        return x0 + (v / axis_max) * span
+
+    parts: List[str] = [
+        f'<svg viewBox="0 0 560 {svg_h}" role="img" '
+        f'aria-label="{esc("; ".join(f"{lbl} {val}" for lbl, val in rows))}">'
+    ]
+    parts.append('<g class="g-grid">')
+    for t in ticks:
+        parts.append(f'<line x1="{tx(t):.1f}" y1="{top}" x2="{tx(t):.1f}" y2="{grid_y2}"/>')
+    parts.append("</g>")
+    parts.append('<g class="g-tick" text-anchor="middle">')
+    for t in ticks:
+        parts.append(f'<text x="{tx(t):.1f}" y="{ticks_y}">{_fmt_tick(t)}</text>')
+    parts.append("</g>")
+    for i, (label, value) in enumerate(rows):
+        by = 20 + i * rowh
+        base = by + 13
+        w = max(tx(value) - x0, 2)
+        parts.append(
+            f'<text class="g-cat" x="{lab_x:.0f}" y="{base}" text-anchor="end">'
+            f'<title>{esc(label)}</title>{esc(_ellipsize(label, max_label))}</text>'
+        )
+        parts.append(f'<rect x="{x0:.0f}" y="{by}" width="{w:.1f}" height="{barh}" rx="4" fill="{color}"/>')
+        parts.append(f'<text class="g-val" x="{x0 + w + 8:.1f}" y="{base}">{value:,}</text>')
+    parts.append(f'<line class="g-axis" x1="{x0:.0f}" y1="{top}" x2="{x0:.0f}" y2="{grid_y2}"/>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def lines_svg(weeks: Sequence[Dict[str, Any]], series: Sequence[Tuple[str, str]], label: str = "Six-week trend") -> str:
     """Multi-line week chart. series = [(key, color), ...]; weeks carry those keys + 'label'."""
     n = len(weeks)
@@ -173,6 +228,27 @@ def _meters(meters: Sequence[Sequence[Any]]) -> str:
     return "".join(out)
 
 
+def _stat_cls(pct: float) -> str:
+    return "ok" if pct >= 95 else ("warn" if pct >= 80 else "bad")
+
+
+def _sla_meters(rows: Sequence[Sequence[Any]]) -> str:
+    """SLA-attainment rows: label, a coloured bar, the attainment % (the headline), then the count."""
+    out = []
+    for label, met, total, kind in rows:
+        pct = 0 if not total else round(met / total * 100)
+        cls = kind if kind in ("ok", "warn", "bad", "blue") else "ok"
+        out.append(
+            '<div class="sla-row">'
+            f'<span class="sla-lab">{esc(label)}</span>'
+            f'<span class="sla-track"><span class="sla-fill {cls}" style="width:{pct}%"></span></span>'
+            f'<span class="sla-pct {cls}">{pct}%</span>'
+            f'<span class="sla-cnt">{met:,} / {total:,}</span>'
+            "</div>"
+        )
+    return "".join(out)
+
+
 def _sec_head(eyebrow: str, title: str, src: str) -> str:
     return (
         f'<div class="sec-head"><span class="eyebrow">{esc(eyebrow)}</span>'
@@ -195,6 +271,19 @@ def _exec(d: Dict[str, Any], n: int = 1) -> str:
         '<div class="tiles t6">' + "".join(tiles) + "</div>"
         '<p class="caption">Running totals across the full reporting week, not a snapshot. '
         "▲/▼ compare to the prior week; green marks the favorable direction.</p></section>"
+    )
+
+
+def _commentary(d: Dict[str, Any]) -> str:
+    """Analyst narrative — the human read on the week. Operator-authored, may contain light HTML."""
+    text = (d.get("commentary") or "").strip()
+    if not text:
+        return ""
+    return (
+        '<section><div class="comment">'
+        '<div class="comment-h"><span class="eyebrow">From your SOC team</span>'
+        "<h3>This week in summary</h3></div>"
+        f'<div class="comment-body">{text}</div></div></section>'
     )
 
 
@@ -252,6 +341,34 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
             '<p class="caption" style="margin:2px 0 6px;">Incidents opened per week, by severity</p>'
             + _legend(sev_series) + lines_svg(d["sev_trend"], sev_series, "Severity over time") + "</div>"
         )
+    # Incidents-by-type + response-SLA attainment — paired row, each shown only when present.
+    type_card = ""
+    if d.get("type_breakdown"):
+        type_card = (
+            '<div class="card"><p class="card-h">Incidents by type</p>'
+            '<p class="caption" style="margin:2px 0 6px;">Opened this week, by classification</p>'
+            f'<div class="chart-fill">{catbar_svg(d["type_breakdown"])}</div></div>'
+        )
+    sla_card = ""
+    sla = d.get("sla")
+    if sla and sla.get("rows"):
+        overall = sla.get("overall")
+        overall_line = (
+            f'<p class="caption" style="margin-top:12px;">Overall <b class="txt-{_stat_cls(overall)}">{overall}%</b> '
+            f'of the {sla.get("total", 0):,} incidents resolved this week met their severity SLA.</p>'
+            if overall is not None else ""
+        )
+        sla_card = (
+            '<div class="card"><p class="card-h">Response SLA attainment</p>'
+            '<p class="caption" style="margin:2px 0 10px;">Share resolved within target time, by severity '
+            '<span class="subtle">— green ≥ 95%, amber ≥ 80%, red below</span></p>'
+            + _sla_meters(sla["rows"]) + overall_line + "</div>"
+        )
+    extra = ""
+    if type_card:  # full-width: long 'Type of Incident' labels need the room
+        extra += f'<div style="margin-top:16px;">{type_card}</div>'
+    if sla_card:
+        extra += f'<div style="margin-top:16px;">{sla_card}</div>'
     return (
         "<section>" + _sec_head(f"{n:02d} · Detection & response", "Incident management", d.get("inc_src", "Jira SECOPS · Security Alert + Security Incident")) +
         '<div class="grid2">'
@@ -261,7 +378,7 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
         '<div class="card"><p class="card-h">Six-week trend</p>'
         '<p class="caption" style="margin:2px 0 6px;">Opened, closed &amp; still-open per week</p>'
         + status_legend + f'<div class="chart-fill">{lines_svg(d["trend"], status_series, "Opened, closed and open per week")}</div></div></div>'
-        + sev_card +
+        + sev_card + extra +
         f'<p class="caption">{d.get("inc_summary_line", "")}</p>'
         f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Open — currently in handling ({len(d["open_rows"])})</h3>'
         '<div class="tbl-wrap"><table><thead><tr>'
@@ -344,6 +461,21 @@ def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     sev_rows = [(lbl, val, SEV_CLASS[lbl]) for lbl, val in v["severity"]]
     crit_rows = "".join(f'<tr><td><a href="{esc(u)}">{esc(c)}</a></td><td class="r cnt-crit">{esc(x)}</td></tr>' for c, u, x in v.get("top_crit", []))
     high_rows = "".join(f'<tr><td><a href="{esc(u)}">{esc(c)}</a></td><td class="r cnt-high">{esc(x)}</td></tr>' for c, u, x in v.get("top_high", []))
+    sla = v.get("sla")
+    sla_card = ""
+    if sla and sla.get("rows"):
+        overall = sla.get("overall")
+        overall_line = (
+            f'<p class="caption" style="margin-top:12px;">Overall <b class="txt-{_stat_cls(overall)}">{overall}%</b> '
+            f'of the {sla.get("total", 0):,} vulnerabilities remediated this week met their patch-management SLA.</p>'
+            if overall is not None else ""
+        )
+        sla_card = (
+            '<div class="card" style="margin-top:16px;"><p class="card-h">Remediation SLA attainment</p>'
+            '<p class="caption" style="margin:2px 0 10px;">Share remediated within target time, by severity '
+            '<span class="subtle">— green ≥ 95%, amber ≥ 80%, red below</span></p>'
+            + _sla_meters(sla["rows"]) + overall_line + "</div>"
+        )
     return (
         "<section>" + head +
         '<div class="tiles t4" style="margin-bottom:16px;">' + tiles + "</div>"
@@ -356,7 +488,7 @@ def _vuln(d: Dict[str, Any], n: int = 5) -> str:
         '<div style="display:grid;grid-template-columns:1fr 1fr;">'
         f'<div><table style="min-width:0;"><tbody>{crit_rows}</tbody></table></div>'
         f'<div style="border-left:1px solid var(--line);"><table style="min-width:0;"><tbody>{high_rows}</tbody></table></div>'
-        "</div></div></div>" +
+        "</div></div></div>" + sla_card +
         (f'<p class="caption">{esc(v.get("note", ""))}</p>' if v.get("note") else "") +
         "</section>"
     )
@@ -390,7 +522,7 @@ def _footer(d: Dict[str, Any]) -> str:
         "<div><b>MTTD</b> — Mean time to detect: event occurrence (Incident Time) to the work item being raised.</div>"
         "<div><b>MTTR</b> — Mean time to resolve: work item raised to Resolved / Closed.</div>"
         "<div><b>Severity</b> — from the Jira Sev-1…Sev-4 field, mapped per the platform's severity classification.</div>"
-        "<div><b>Reporting period</b> — one week; start day configurable (Monday or Sunday).</div>"
+        "<div><b>Reporting period</b> — one week.</div>"
         '</div><div class="footbar"><div class="org">Athena Security Group</div>'
         f'<div class="lnks">🌐 <a href="#">Website</a> &nbsp;|&nbsp; 📄 <a href="#">Docs</a> &nbsp;|&nbsp; ✉️ <a href="#">{esc(email)}</a></div>'
         '<div class="gen">Prepared by the Athena SOC team · Confidential — for the named client only · Do not reply to this report.</div>'
@@ -419,7 +551,7 @@ def render_report(data: Dict[str, Any], css: Optional[str] = None) -> str:
         counter["n"] += 1
         return counter["n"]
 
-    body = note + band + _exec(data, nxt()) + _incidents(data, nxt())
+    body = note + band + _exec(data, nxt()) + _commentary(data) + _incidents(data, nxt())
     if sections.get("device", True):
         body += _device(data, nxt())
     if sections.get("endpoint", True):

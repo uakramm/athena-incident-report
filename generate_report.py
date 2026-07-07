@@ -84,6 +84,49 @@ def section_enablement() -> Dict[str, bool]:
     }
 
 
+_SLA_DEFAULT_MINUTES = {"Critical": 240, "High": 480, "Medium": 1440, "Low": 4320}
+
+
+def sla_targets() -> Dict[str, float]:
+    """Per-severity resolution SLA in seconds. Override via REPORT_SLA_<LEVEL>_MINUTES."""
+    out: Dict[str, float] = {}
+    for label, default_min in _SLA_DEFAULT_MINUTES.items():
+        raw = os.getenv(f"REPORT_SLA_{label.upper()}_MINUTES")
+        try:
+            minutes = float(raw) if raw not in (None, "") else float(default_min)
+        except ValueError:
+            minutes = float(default_min)
+        out[label] = minutes * 60
+    return out
+
+
+_VULN_SLA_DEFAULT_DAYS = {"Critical": 7, "High": 14, "Medium": 30, "Low": 90}
+
+
+def vuln_sla_targets() -> Dict[str, float]:
+    """Per-severity vulnerability remediation SLA in seconds. Override via REPORT_VULN_SLA_<LEVEL>_DAYS."""
+    out: Dict[str, float] = {}
+    for label, default_days in _VULN_SLA_DEFAULT_DAYS.items():
+        raw = os.getenv(f"REPORT_VULN_SLA_{label.upper()}_DAYS")
+        try:
+            days = float(raw) if raw not in (None, "") else float(default_days)
+        except ValueError:
+            days = float(default_days)
+        out[label] = days * 86400
+    return out
+
+
+def fmt_sla_target(seconds: float) -> str:
+    minutes = int(round(seconds / 60))
+    if minutes and minutes % 1440 == 0:
+        return f"{minutes // 1440}d"
+    if minutes and minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    if minutes >= 60:
+        return f"{minutes // 60}h {minutes % 60:02d}m"
+    return f"{minutes}m"
+
+
 def _sev_maps(pairs: Sequence[Tuple[str, str]]) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
     """pairs = [(label, sev_value)] in priority order (Critical first).
     Returns (value->label, label->[values]). First label to claim a value wins."""
@@ -322,6 +365,67 @@ def period_label(start: dt.date, end: dt.date) -> str:
 # Jira report builder
 # --------------------------------------------------------------------------- #
 
+def auto_commentary(*, opened_n: int, closed_n: int, open_n: int, prev_open: Optional[int],
+                    mttr_secs: Optional[float], inc_sla: Optional[Dict[str, Any]],
+                    type_breakdown: Sequence[Tuple[str, int]], open_rows: Sequence[Dict[str, Any]],
+                    include_vuln: bool, v_resolved: int, v_new: int,
+                    vuln_sla: Optional[Dict[str, Any]]) -> str:
+    """Assemble a factual 2-paragraph narrative from the week's computed metrics.
+
+    Deterministic (no LLM / network) — every figure traces to data already in the
+    report. Used as the default when no manual commentary is supplied; the analyst
+    can still override via supplemental JSON or REPORT_COMMENTARY.
+    """
+    def worst(sla: Optional[Dict[str, Any]]) -> Optional[Tuple[str, int]]:
+        rows = (sla or {}).get("rows") or []
+        cand = sorted((met / total, label) for label, met, total, _ in rows if total)
+        if not cand:
+            return None
+        frac, label = cand[0]
+        return label.split(" ≤")[0], round(frac * 100)
+
+    p1 = [f"We handled <b>{opened_n:,}</b> incident{'' if opened_n == 1 else 's'} this week and "
+          f"resolved <b>{closed_n:,}</b>"]
+    if open_n:
+        p1.append(f", closing the week with {open_n:,} still in active handling")
+        if prev_open is not None and open_n != prev_open:
+            p1.append(f" (down from {prev_open:,} the week prior)" if open_n < prev_open
+                      else f" (up from {prev_open:,} the week prior)")
+    else:
+        p1.append(", clearing the incident queue entirely")
+    p1.append(".")
+    if mttr_secs:
+        p1.append(f" Mean time to resolve held at {fmt_duration(mttr_secs)}.")
+    if inc_sla and inc_sla.get("overall") is not None:
+        p1.append(f" Overall <b>{inc_sla['overall']}%</b> of resolved incidents met their severity SLA")
+        w = worst(inc_sla)
+        if w and w[1] < 95:
+            p1.append(f" — though {w[0]} resolution, at {w[1]}%, fell short of target and is our focus "
+                      "for the coming week")
+        p1.append(".")
+
+    p2: List[str] = []
+    if open_rows:
+        top = open_rows[0]
+        p2.append(f"The most significant item still in handling is <b>{render.esc(top['ref'])}</b> — "
+                  f"{render.esc(top['summary'])} ({render.esc(top['sev'])}).")
+    if type_breakdown:
+        label, cnt = type_breakdown[0]
+        p2.append(f" The most common classification this week was {render.esc(label)} ({cnt:,}).")
+    if include_vuln:
+        vt = (f" On exposure, we remediated <b>{v_resolved:,}</b> "
+              f"vulnerabilit{'y' if v_resolved == 1 else 'ies'} against {v_new:,} newly detected")
+        if vuln_sla and vuln_sla.get("overall") is not None:
+            vt += f", {vuln_sla['overall']}% of them within the patch-management SLA"
+        vt += "."
+        p2.append(vt)
+
+    out = [f"<p>{''.join(p1)}</p>"]
+    if p2:
+        out.append(f"<p>{''.join(p2)}</p>")
+    return "".join(out)
+
+
 def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]:
     key = args.project_key
     now = dt.datetime.now(dt.timezone.utc)
@@ -485,6 +589,62 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             "source": source_of(f), "ttr": fmt_duration(sec),
         })
 
+    # ---- incidents by type (opened this week, grouped by the Type-of-Incident field) ----
+    type_field = cli.field_id(args.incident_type_field)
+    type_breakdown: List[Tuple[str, int]] = []
+    if type_field:
+        tally: Dict[str, int] = {}
+        for it in cli.search(incidents_only(opened(INC_TYPES, start, end)), [type_field], limit=2000):
+            val = it.get("fields", {}).get(type_field)
+            names: List[str] = []
+            if isinstance(val, list):  # multi-select
+                for item in val:
+                    name = item.get("value") if isinstance(item, dict) else item
+                    if name:
+                        names.append(str(name))
+            elif isinstance(val, dict):
+                name = val.get("value") or val.get("name")
+                if name:
+                    names.append(str(name))
+            elif val:
+                names.append(str(val))
+            for name in (names or ["Unclassified"]):
+                tally[name] = tally.get(name, 0) + 1
+        type_breakdown = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+
+    # ---- response SLA attainment (of incidents closed this week, % resolved within target) ----
+    sla_secs = sla_targets()
+    sla_buckets: Dict[str, List[int]] = {label: [0, 0] for label in inc_labels}  # label -> [met, total]
+    for it in cli.search(incidents_only(closed(INC_TYPES, start, end)),
+                         [sev_field, mttr_field, "created", "resolutiondate"] if mttr_field else [sev_field, "created", "resolutiondate"],
+                         limit=2000):
+        f = it.get("fields", {})
+        lbl, _ = sev_label(f)
+        if lbl not in sla_buckets:
+            continue
+        sec = coerce_seconds(f.get(mttr_field), args.duration_unit) if mttr_field else None
+        if sec is None:
+            c, r = parse_jira_dt(f.get("created")), parse_jira_dt(f.get("resolutiondate"))
+            sec = (r - c).total_seconds() if c and r else None
+        if sec is None:
+            continue
+        sla_buckets[lbl][1] += 1
+        if sec <= sla_secs.get(lbl, float("inf")):
+            sla_buckets[lbl][0] += 1
+    sla_rows: List[Tuple[str, int, int, str]] = []
+    sla_met = sla_total = 0
+    for label in inc_labels:
+        met, total = sla_buckets[label]
+        if total == 0:
+            continue
+        sla_met += met
+        sla_total += total
+        pct = met / total
+        kind = "ok" if pct >= 0.95 else ("warn" if pct >= 0.8 else "bad")
+        sla_rows.append((f"{label} ≤ {fmt_sla_target(sla_secs[label])}", met, total, kind))
+    sla = ({"rows": sla_rows, "met": sla_met, "total": sla_total,
+            "overall": round(sla_met / sla_total * 100)} if sla_rows else None)
+
     # ---- vulnerabilities ----
     vuln_sev, total_open, counts_by_label = [], 0, {}
     for label in vuln_labels:
@@ -495,6 +655,51 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     v_resolved = cli.count(closed(VULN_TYPE, start, end))
     v_new = cli.count(opened(VULN_TYPE, start, end))
     v_resolved_prev = cli.count(closed(VULN_TYPE, p_start, p_end))
+
+    # ---- vulnerability remediation SLA (of vulns resolved this week, % remediated within target) ----
+    vuln_sla_secs = vuln_sla_targets()
+    vuln_sla_buckets: Dict[str, List[int]] = {label: [0, 0] for label in vuln_labels}  # label -> [met, total]
+    for it in cli.search(closed(VULN_TYPE, start, end), [sev_field, "created", "resolutiondate"], limit=2000):
+        f = it.get("fields", {})
+        raw = f.get(sev_field)
+        raw = raw.get("value") if isinstance(raw, dict) else raw
+        lbl = vuln_v2l.get(raw)
+        if lbl not in vuln_sla_buckets:
+            continue
+        c, r = parse_jira_dt(f.get("created")), parse_jira_dt(f.get("resolutiondate"))
+        sec = (r - c).total_seconds() if c and r else None
+        if sec is None:
+            continue
+        vuln_sla_buckets[lbl][1] += 1
+        if sec <= vuln_sla_secs.get(lbl, float("inf")):
+            vuln_sla_buckets[lbl][0] += 1
+    vuln_sla_rows: List[Tuple[str, int, int, str]] = []
+    vsla_met = vsla_total = 0
+    for label in vuln_labels:
+        met, total = vuln_sla_buckets[label]
+        if total == 0:
+            continue
+        vsla_met += met
+        vsla_total += total
+        pct = met / total
+        kind = "ok" if pct >= 0.95 else ("warn" if pct >= 0.8 else "bad")
+        vuln_sla_rows.append((f"{label} ≤ {fmt_sla_target(vuln_sla_secs[label])}", met, total, kind))
+    vuln_sla = ({"rows": vuln_sla_rows, "met": vsla_met, "total": vsla_total,
+                 "overall": round(vsla_met / vsla_total * 100)} if vuln_sla_rows else None)
+
+    # ---- analyst commentary: manual override wins, else auto-generate from the metrics ----
+    include_vuln = section_enablement().get("vuln", True)
+    manual_commentary = ((args.supplemental_data or {}).get("commentary") or os.getenv("REPORT_COMMENTARY") or "").strip()
+    if manual_commentary:
+        commentary = manual_commentary
+    elif _env_bool("REPORT_COMMENTARY_AUTO", True):
+        commentary = auto_commentary(
+            opened_n=opened_n, closed_n=closed_n, open_n=open_n, prev_open=p_open,
+            mttr_secs=mttr, inc_sla=sla, type_breakdown=type_breakdown, open_rows=open_rows,
+            include_vuln=include_vuln, v_resolved=v_resolved, v_new=v_new, vuln_sla=vuln_sla)
+    else:
+        commentary = ""
+
     top_crit = top_cves(cli, scoped(VULN_TYPE, "statusCategory != Done", sev_in(vuln_label_values.get("Critical", ["Sev-1"]))), args, "crit")
     top_high = top_cves(cli, scoped(VULN_TYPE, "statusCategory != Done", sev_in(vuln_label_values.get("High", ["Sev-2"]))), args, "high")
 
@@ -514,7 +719,9 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             "uptime": (args.supplemental_data.get("availability", {}).get("uptime", "—") if args.supplemental_data else "—"),
             "uptime_note": (f'SLA {args.supplemental_data.get("availability", {}).get("sla", "")} · met' if args.supplemental_data and args.supplemental_data.get("availability") else "provided separately"),
         },
+        "commentary": commentary,
         "inc_severity": inc_sev, "inc_total_opened": opened_n,
+        "type_breakdown": type_breakdown, "sla": sla,
         "trend": trend, "sev_trend": sev_trend, "sev_trend_labels": inc_labels,
         "inc_summary_line": f"We closed <b>{closed_n:,} of {opened_n:,}</b> items raised this week — ending the week with {open_n:,} open, all in active handling below." if opened_n else "",
         "open_rows": open_rows, "closed_count": closed_n, "closed_rows": closed_rows,
@@ -524,7 +731,7 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             "high_note": "", "resolved": v_resolved,
             "resolved_delta": delta_html(v_resolved, v_resolved_prev, favorable="up"),
             "new": v_new, "net": v_new - v_resolved, "severity": vuln_sev,
-            "total_open": total_open, "top_crit": top_crit, "top_high": top_high, "note": "",
+            "total_open": total_open, "top_crit": top_crit, "top_high": top_high, "sla": vuln_sla, "note": "",
         },
         "_sections_enabled": section_enablement(),
     }
@@ -579,8 +786,24 @@ def sample_data() -> Dict[str, Any]:
             "mttr": "3h 42m", "mttr_delta": '<b class="up">▼ 22 min</b> vs last week',
             "uptime": "99.98%", "uptime_note": "SLA 99.9% · met",
         },
+        "commentary": (
+            "<p>A steadier week overall. Alert volume rose 24% on the back of a phishing wave targeting "
+            "finance mailboxes — all quarantined at the gateway, none reached inboxes. We tuned two "
+            "detection rules to cut the noise and cleared five items carried over from last week.</p>"
+            "<p>The one item worth your attention: <b>NSO-4821</b>, outbound C2 beaconing blocked at the WAF. "
+            "The affected host (LAP-014) is isolated and under review; no data movement was observed. "
+            "We resolved 66 of 72 incidents inside SLA and closed the week with 6 open, all in active handling.</p>"
+        ),
         "inc_severity": [("Critical", 8), ("High", 27), ("Medium", 37)],
         "inc_total_opened": 72,
+        "type_breakdown": [
+            ("Phishing", 24), ("Malware", 14), ("Suspicious sign-in", 11),
+            ("Policy violation", 9), ("Unauthorized access", 7), ("Data exposure", 4), ("Other", 3),
+        ],
+        "sla": {
+            "rows": [("Critical ≤ 4h", 8, 8, "ok"), ("High ≤ 8h", 25, 27, "ok"), ("Medium ≤ 24h", 33, 37, "warn")],
+            "met": 66, "total": 72, "overall": 92,
+        },
         "trend": [
             {"label": "W-5", "opened": 54, "closed": 49, "open": 9},
             {"label": "W-4", "opened": 61, "closed": 58, "open": 12},
@@ -632,6 +855,11 @@ def sample_data() -> Dict[str, Any]:
             "crit_open": 4, "high_open": 31, "high_note": "across 12 assets", "resolved": 47,
             "resolved_delta": '<b class="up">▲ 12</b> vs last week', "new": 22, "net": -25,
             "severity": [("Critical", 4), ("High", 31), ("Medium", 96), ("Low", 140)], "total_open": 271,
+            "sla": {
+                "rows": [("Critical ≤ 7d", 5, 5, "ok"), ("High ≤ 14d", 18, 19, "ok"),
+                         ("Medium ≤ 30d", 20, 23, "warn")],
+                "met": 43, "total": 47, "overall": 91,
+            },
             "top_crit": [("CVE-2026-13775", "#", "SRV-DB-02"), ("CVE-2026-13780", "#", "SRV-DB-02"),
                          ("CVE-2026-13781", "#", "SRV-APP-01"), ("CVE-2026-13796", "#", "SRV-APP-01")],
             "top_high": [("CVE-2026-43701", "#", 8), ("CVE-2026-43715", "#", 8),
@@ -669,6 +897,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--mttr-field", default="MTTR (Minutes)")
     p.add_argument("--mttd-field", default="MTTD (Minutes)")
     p.add_argument("--incident-time-field", default="Incident Time")
+    p.add_argument("--incident-type-field", default="Type of Incident", help="Field driving the 'Incidents by type' breakdown.")
     p.add_argument("--vuln-id-field", default="Vulnerability ID(s)")
     p.add_argument("--source-field", default="components", help="'components', 'labels', or a custom field name for the alert source.")
     p.add_argument("--duration-unit", default="minutes", choices=["seconds", "minutes", "hours"], help="Unit of a numeric MTTR/MTTD field.")
