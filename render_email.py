@@ -143,6 +143,30 @@ def _two_col(left: str, right: str, top: int = 16) -> str:
     )
 
 
+def _two_col_cards(cells: Sequence[Tuple[str, str, str]], top: int = 16) -> str:
+    """Two cards that are the CELLS of a single table row, so the table forces them
+    to equal height (the taller sets the height; the shorter's paper cell fills the
+    rest). cells = [(title, caption, body), (title, caption, body)]. Widths are
+    explicit against the fixed 960px body: 472 + 16 gutter + 472."""
+    card_td = (f'valign="top" bgcolor="{PAPER}" style="border:1px solid {LINE};border-radius:12px;'
+               f'box-shadow:{SHADOW};padding:18px;')
+    tds = []
+    for title, caption, body in cells:
+        cap = (f'<div style="{FONT}font-size:12px;color:{MUTED};padding:0 0 10px;">{caption}</div>'
+               if caption else "")
+        tds.append(
+            f'<td width="472" {card_td}">'
+            f'<div style="{FONT}font-size:12.5px;font-weight:680;color:{INK};padding:0 0 4px;">{esc(title)}</div>'
+            f'{cap}{body}</td>'
+        )
+    return (
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="margin-top:{top}px;table-layout:fixed;"><tr>'
+        f'{tds[0]}<td width="16" style="width:16px;font-size:0;line-height:0;">&nbsp;</td>{tds[1]}'
+        f'</tr></table>'
+    )
+
+
 def _sec_head(eyebrow: str, title: str, src: str) -> str:
     right = (f'<td align="right" style="{FONT}font-size:11px;color:{MUTED};vertical-align:bottom;">{esc(src)}</td>'
              if src else "<td></td>")
@@ -413,8 +437,7 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
 
     sev_rows = [(lbl, val, SEV_FILL[lbl]) for lbl, val in d["inc_severity"]]
     sev_body = _chart_img(d, "inc_severity", "Incidents opened by severity") or _bar_rows(sev_rows)
-    sev_card = _card("Opened by severity", f'This week &middot; {sum(v for _, v in d["inc_severity"]):,} shown',
-                     sev_body)
+    sev_caption = f'This week &middot; {sum(v for _, v in d["inc_severity"]):,} shown'
 
     # 6-week trend (line chart on web) → numeric table
     weeks = d["trend"]
@@ -441,8 +464,10 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
             trend_body += f'<div style="padding:2px 0 10px;">{spark}</div>'
         trend_body += _num_table(headers, trend_rows,
                                  dot_colors=[STATUS["opened"], STATUS["closed"], STATUS["open"]])
-    trend_card = _card("Six-week trend", "Opened, closed &amp; still-open per week", trend_body)
-    parts.append(_two_col(sev_card, trend_card))
+    parts.append(_two_col_cards([
+        ("Opened by severity", sev_caption, sev_body),
+        ("Six-week trend", "Opened, closed &amp; still-open per week", trend_body),
+    ]))
 
     # Severity over time — full-width line chart, mirrors the HTML report.
     sev_trend_img = _chart_img(d, "sev_trend", "Incidents opened per week, by severity")
