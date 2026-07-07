@@ -905,6 +905,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--max-closed-rows", type=int, default=6)
 
     p.add_argument("--supplemental", help="JSON file with device/endpoint/availability data (not in Jira).")
+    p.add_argument("--email", action="store_true",
+                   help="Also write an email-safe HTML version (<out>-email.html) for pasting into Outlook.")
     return p.parse_args(argv)
 
 
@@ -964,8 +966,17 @@ def main(argv: Sequence[str]) -> int:
         fh.write(render.render_report(data))
     log(f"Wrote {os.path.relpath(html_path, SCRIPT_DIR)}")
     log("For a PDF: open the HTML and Print → Save as PDF.")
+
+    email_path = None
+    if args.email:
+        import render_email
+        email_path = re.sub(r"\.html?$", "", html_path) + "-email.html"
+        with open(email_path, "w", encoding="utf-8") as fh:
+            fh.write(render_email.render_email(data))
+        log(f"Wrote {os.path.relpath(email_path, SCRIPT_DIR)} (email-safe — open it, select all, copy, paste into Outlook).")
+
     if args.open_after:
-        webbrowser.open("file://" + os.path.abspath(html_path))
+        webbrowser.open("file://" + os.path.abspath(email_path or html_path))
     return 0
 
 

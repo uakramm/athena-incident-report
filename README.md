@@ -64,6 +64,18 @@ or wherever `REPORT_OUTPUT_DIR` / `--out` points). Nothing is uploaded anywhere.
 **For a PDF:** open the HTML and **Print → Save as PDF** (Cmd/Ctrl+P). The stylesheet already handles
 page breaks and margins for a clean print.
 
+**For email** (Outlook / Gmail): add `--email` to also write `<out>-email.html`. The standard report uses
+SVG charts, CSS variables and flexbox — none of which survive an email client — so the email version is a
+separate, table-based, inline-styled rendering (bar charts become coloured table cells; the trend line
+chart becomes a compact numbers table). To send it:
+
+```bash
+python generate_report.py --env-file .env.athena --email
+```
+
+Then **open `…-email.html` in a browser, Select All (Cmd/Ctrl+A), Copy, and Paste into a new Outlook /
+Gmail message.** The formatting comes across and you can send it inline — no attachment needed.
+
 ### Common options
 
 | Flag | Purpose |
@@ -74,6 +86,7 @@ page breaks and margins for a clean print.
 | `--supplemental FILE.json` | Device / endpoint / availability data — see `supplemental.example.json`. |
 | `--env-file .env.neuro` | Use a per-client credentials file. |
 | `--out-dir DIR` / `--out PATH` | Where to save (defaults to `reports/`, auto-named). |
+| `--email` | Also write an email-safe `…-email.html` for pasting into Outlook / Gmail. |
 | `--open` | Open the report when done. |
 
 ### Jira field mapping (override if your names differ)
@@ -132,5 +145,6 @@ Use these env vars to include or omit non-core report sections:
 
 - `generate_report.py` — CLI + Jira fetch + orchestration.
 - `render.py` — pure HTML/SVG rendering from a data dict (also powers `--sample`).
+- `render_email.py` — email-safe (table-based, inline-styled) rendering of the same data, for `--email`.
 - `report_style.css` — the report stylesheet (light + dark, print-ready).
 - `supplemental.example.json` — shape of the non-Jira data.
