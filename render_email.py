@@ -143,11 +143,23 @@ def _two_col(left: str, right: str, top: int = 16) -> str:
     )
 
 
+def _spacer(px: int) -> str:
+    """A fixed-height vertical spacer that survives Outlook."""
+    return f'<div style="height:{px}px;font-size:0;line-height:0;">&nbsp;</div>' if px > 0 else ""
+
+
+# Rendered display height (px, in the fixed 960px layout) of a chart inside a
+# _two_col_cards cell: the card inner width is ~436px and the PNG aspect is 560:svg_h.
+def _chart_display_h(svg_h: float) -> int:
+    return round(436 * svg_h / 560)
+
+
 def _two_col_cards(cells: Sequence[Tuple[str, str, str]], top: int = 16) -> str:
     """Two cards that are the CELLS of a single table row, so the table forces them
     to equal height (the taller sets the height; the shorter's paper cell fills the
-    rest). cells = [(title, caption, body), (title, caption, body)]. Widths are
-    explicit against the fixed 960px body: 472 + 16 gutter + 472."""
+    rest). cells = [(title, caption, body), ...]. Widths are explicit against the
+    fixed 960px body: 472 + 16 gutter + 472. To vertically centre a shorter card's
+    body, pre-pad it with _spacer() before passing it in."""
     card_td = (f'valign="top" bgcolor="{PAPER}" style="border:1px solid {LINE};border-radius:12px;'
                f'box-shadow:{SHADOW};padding:18px;')
     tds = []
@@ -452,6 +464,13 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
         # HTML legend above the chart image (matches the report; keeps it fixed-size).
         trend_body = _legend([("Opened", STATUS["opened"]), ("Closed", STATUS["closed"]),
                               ("Open at week end", STATUS["open"])]) + trend_img
+        # The trend card is taller (legend ~26px + a 232-tall line chart) than the
+        # severity bars, so centre the shorter severity chart by pre-padding it with
+        # half the gap; the equal-height table row supplies the matching space below.
+        n_sev = max(len(d["inc_severity"]), 1)
+        gap = (26 + _chart_display_h(232)) - _chart_display_h(80 + (n_sev - 1) * 40)
+        if d.get("_chart_src", {}).get("inc_severity") and gap > 0:
+            sev_body = _spacer(gap // 2) + sev_body
     else:
         spark = _sparkline_svg(
             [("Opened", [w["opened"] for w in weeks]),
