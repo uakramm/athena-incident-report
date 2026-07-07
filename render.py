@@ -536,12 +536,15 @@ def render_report(data: Dict[str, Any], css: Optional[str] = None) -> str:
     note = ""
     if data.get("preview_note"):
         note = f'<div class="note">{data["preview_note"]}</div>'
+    pname, pkey = (data.get("project_name") or "").strip(), (data.get("project_key") or "").strip()
+    proj = f"{pname} ({pkey})" if pname and pkey else (pname or pkey)
+    proj_span = f' · Jira project <b>{esc(proj)}</b>' if proj else ""
     band = (
         '<div class="band"><div class="ey">Athena Security Group · Managed Detection &amp; Response</div>'
         "<h1>Weekly Security Operations Report</h1>"
-        f'<div class="sub"><b>{esc(data["client"])}</b> · {esc(data["environment"])} &nbsp;·&nbsp; Tenant: {esc(data["tenant"])}</div>'
-        f'<div class="sub">Reporting period: <b>{esc(data["period_label"])}</b> · week starts {esc(data["week_start"])}</div></div>'
-        '<div class="metaline"><span>Prepared by <b>Athena SOC Team</b></span>'
+        f'<div class="sub"><b>{esc(data["client"])}</b> ({esc(data["tenant"])})</div>'
+        f'<div class="sub">Reporting period: <b>{esc(data["period_label"])}</b></div></div>'
+        f'<div class="metaline"><span>Prepared by <b>Athena SOC Team</b>{proj_span}</span>'
         f'<span>Generated <b>{esc(data["generated"])}</b> · Confidential</span></div>'
     )
     sections = data.get("_sections_enabled", {})

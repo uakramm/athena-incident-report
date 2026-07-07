@@ -336,18 +336,26 @@ def _pill(sev: str, label: str) -> str:
 # Sections
 # --------------------------------------------------------------------------- #
 
+def _project_label(d: Dict[str, Any]) -> str:
+    """'Name (KEY)' — or just the key/name if only one is known."""
+    name, key = (d.get("project_name") or "").strip(), (d.get("project_key") or "").strip()
+    return f"{name} ({key})" if name and key else (name or key)
+
+
 def _band(d: Dict[str, Any]) -> str:
+    proj = _project_label(d)
+    proj_cell = (f' &middot; Jira project <b style="color:{INK2};">{esc(proj)}</b>' if proj else "")
     return (
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{BRAND}" '
         f'style="border-radius:12px 12px 0 0;"><tr><td align="center" style="padding:26px 24px 24px;">'
         f'<div style="{FONT}font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:{BRAND_SUB};font-weight:600;">Athena Security Group &middot; Managed Detection &amp; Response</div>'
         f'<div style="{FONT}font-size:26px;font-weight:700;color:{BRAND_INK};padding-top:10px;">Weekly Security Operations Report</div>'
-        f'<div style="{FONT}font-size:13px;color:{BRAND_SUB};padding-top:8px;"><b style="color:{BRAND_INK};">{esc(d["client"])}</b> &middot; {esc(d["environment"])} &middot; Tenant: {esc(d["tenant"])}</div>'
-        f'<div style="{FONT}font-size:13px;color:{BRAND_SUB};padding-top:2px;">Reporting period: <b style="color:{BRAND_INK};">{esc(d["period_label"])}</b> &middot; week starts {esc(d["week_start"])}</div>'
+        f'<div style="{FONT}font-size:13px;color:{BRAND_SUB};padding-top:8px;"><b style="color:{BRAND_INK};">{esc(d["client"])}</b> ({esc(d["tenant"])})</div>'
+        f'<div style="{FONT}font-size:13px;color:{BRAND_SUB};padding-top:2px;">Reporting period: <b style="color:{BRAND_INK};">{esc(d["period_label"])}</b></div>'
         f'</td></tr></table>'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAPER}" '
         f'style="border:1px solid {LINE};border-top:none;border-radius:0 0 12px 12px;box-shadow:{SHADOW};"><tr>'
-        f'<td style="{FONT}font-size:11.5px;color:{MUTED};padding:9px 16px;">Prepared by <b style="color:{INK2};">Athena SOC Team</b></td>'
+        f'<td style="{FONT}font-size:11.5px;color:{MUTED};padding:9px 16px;">Prepared by <b style="color:{INK2};">Athena SOC Team</b>{proj_cell}</td>'
         f'<td align="right" style="{FONT}font-size:11.5px;color:{MUTED};padding:9px 16px;">Generated <b style="color:{INK2};">{esc(d["generated"])}</b> &middot; Confidential</td>'
         f'</tr></table>'
     )

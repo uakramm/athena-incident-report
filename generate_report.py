@@ -207,6 +207,13 @@ class JiraClient:
             self._fields = self._req("GET", "/rest/api/3/field")
         return self._fields
 
+    def project_name(self, key: str) -> Optional[str]:
+        try:
+            data = self._req("GET", "/rest/api/3/project/" + urllib.parse.quote(key))
+            return (data or {}).get("name")
+        except Exception:
+            return None
+
     def field_id(self, name: str) -> Optional[str]:
         if name.startswith("customfield_") or name in ("created", "resolutiondate", "status", "summary", "issuetype", "components", "labels"):
             return name
@@ -357,6 +364,24 @@ def d(day: dt.date) -> str:
 
 def strip_leading_zero(text: str) -> str:
     return re.sub(r"\b0(\d)", r"\1", text)
+
+
+def generated_string() -> str:
+    """Now, in REPORT_TIMEZONE (default US Eastern), e.g. '6 Jul 2026, 09:01 ET'.
+    The zone label is generalised: EDT/EST -> ET, CDT/CST -> CT, PDT/PST -> PT."""
+    tz_name = _env("REPORT_TIMEZONE", "America/New_York")
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = dt.timezone.utc
+    now = dt.datetime.now(tz)
+    abbr = now.strftime("%Z") or "UTC"
+    # Generalise only the US zones, where E{S,D}T→ET etc. is the common convention.
+    us = {"EST": "ET", "EDT": "ET", "CST": "CT", "CDT": "CT",
+          "MST": "MT", "MDT": "MT", "PST": "PT", "PDT": "PT"}
+    label = us.get(abbr, abbr)
+    return strip_leading_zero(now.strftime("%d %b %Y, %H:%M")) + f" {label}"
 
 
 def period_label(start: dt.date, end: dt.date) -> str:
@@ -706,11 +731,13 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     top_crit = top_cves(cli, scoped(VULN_TYPE, "statusCategory != Done", sev_in(vuln_label_values.get("Critical", ["Sev-1"]))), args, "crit")
     top_high = top_cves(cli, scoped(VULN_TYPE, "statusCategory != Done", sev_in(vuln_label_values.get("High", ["Sev-2"]))), args, "high")
 
+    project_name = os.getenv("REPORT_PROJECT_NAME") or cli.project_name(key) or ""
     data: Dict[str, Any] = {
         "client": args.client, "environment": args.environment, "tenant": args.tenant,
+        "project_key": key, "project_name": project_name,
         "period_label": period_label(start, end), "week_start": "Sunday" if args.week_start.lower().startswith("sun") else "Monday",
         "_period_end": (end - dt.timedelta(days=1)).isoformat(),
-        "generated": strip_leading_zero(now.strftime("%d %b %Y, %H:%M UTC")),
+        "generated": generated_string(),
         "support_email": args.support_email or f"alerts@{args.tenant}",
         "preview_note": None,
         "exec": {
@@ -777,8 +804,9 @@ def top_cves(cli: JiraClient, jql: str, args: argparse.Namespace, kind: str) -> 
 def sample_data() -> Dict[str, Any]:
     return {
         "client": "Neuro", "environment": "Production", "tenant": "neuro.athenasecuritygrp.com",
+        "project_key": "NSO", "project_name": "Neuro Security Operations",
         "period_label": "Mon 29 Jun – Sun 5 Jul 2026", "week_start": "Monday", "_period_end": "2026-07-05",
-        "generated": "6 Jul 2026, 09:01 UTC", "support_email": "alerts@neuro.athenasecuritygrp.com",
+        "generated": "6 Jul 2026, 09:01 ET", "support_email": "alerts@neuro.athenasecuritygrp.com",
         "preview_note": ("<strong>Template preview.</strong> Illustrative sample data — run "
                          "<code>generate_report.py</code> against a client's SECOPS Jira project for live figures."),
         "exec": {
