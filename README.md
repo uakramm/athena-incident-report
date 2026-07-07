@@ -76,6 +76,26 @@ python generate_report.py --env-file .env.athena --email
 Then **open `…-email.html` in a browser, Select All (Cmd/Ctrl+A), Copy, and Paste into a new Outlook /
 Gmail message.** The formatting comes across and you can send it inline — no attachment needed.
 
+### Sending it automatically with Entra + Microsoft Graph
+
+For a fully hands-off send (no copy/paste), create an Entra app registration with Microsoft Graph
+`Mail.Send` application permission, grant admin consent, then set the `ENTRA_*` / `REPORT_EMAIL_*`
+vars in the client's `.env` (see `.env.example`) and pass `--send-email`. **Nothing is ever sent unless
+you pass this flag** — a normal run only ever writes local files.
+
+```bash
+# Preview the subject/recipients without connecting to Graph or sending anything:
+python generate_report.py --env-file .env.neuro --email-dry-run
+
+# Actually send it:
+python generate_report.py --env-file .env.neuro --send-email
+```
+
+The sender mailbox is `REPORT_EMAIL_FROM`; the app sends through
+`/users/{REPORT_EMAIL_FROM}/sendMail`. `--email-to` / `--email-cc` / `--email-bcc` /
+`--email-subject` override the `.env` values for a one-off send. The message body is the same
+email-safe HTML rendering as `--email`, so it renders directly in the client's inbox with no attachment.
+
 ### Common options
 
 | Flag | Purpose |
@@ -146,5 +166,6 @@ Use these env vars to include or omit non-core report sections:
 - `generate_report.py` — CLI + Jira fetch + orchestration.
 - `render.py` — pure HTML/SVG rendering from a data dict (also powers `--sample`).
 - `render_email.py` — email-safe (table-based, inline-styled) rendering of the same data, for `--email`.
+- `mailer.py` — Microsoft Graph email delivery via an Entra app, for `--send-email`.
 - `report_style.css` — the report stylesheet (light + dark, print-ready).
 - `supplemental.example.json` — shape of the non-Jira data.

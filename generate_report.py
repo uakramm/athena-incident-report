@@ -907,6 +907,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--supplemental", help="JSON file with device/endpoint/availability data (not in Jira).")
     p.add_argument("--email", action="store_true",
                    help="Also write an email-safe HTML version (<out>-email.html) for pasting into Outlook.")
+
+    p.add_argument("--send-email", action="store_true",
+                   help="Send the report through Microsoft Graph. Opt-in — never sent automatically. "
+                        "Requires ENTRA_* and REPORT_EMAIL_* in .env.")
+    p.add_argument("--email-dry-run", action="store_true",
+                   help="Compose the email and print subject/recipients without sending or connecting to Graph.")
+    p.add_argument("--email-to", help="Comma-separated recipient override. Env: REPORT_EMAIL_TO.")
+    p.add_argument("--email-cc", help="Comma-separated Cc override. Env: REPORT_EMAIL_CC.")
+    p.add_argument("--email-bcc", help="Comma-separated Bcc override. Env: REPORT_EMAIL_BCC.")
+    p.add_argument("--email-subject", help="Subject template ({client} {period} {environment} {tenant}). Env: REPORT_EMAIL_SUBJECT.")
     return p.parse_args(argv)
 
 
@@ -974,6 +984,14 @@ def main(argv: Sequence[str]) -> int:
         with open(email_path, "w", encoding="utf-8") as fh:
             fh.write(render_email.render_email(data))
         log(f"Wrote {os.path.relpath(email_path, SCRIPT_DIR)} (email-safe — open it, select all, copy, paste into Outlook).")
+
+    if args.send_email or args.email_dry_run:
+        import mailer
+        try:
+            mailer.send_report_email(data, args, log=log)
+        except mailer.MailerError as exc:
+            log(f"Email not sent: {exc}")
+            return 2
 
     if args.open_after:
         webbrowser.open("file://" + os.path.abspath(email_path or html_path))
