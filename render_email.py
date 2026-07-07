@@ -66,18 +66,18 @@ def _stat_cls(pct: float) -> str:
 # Primitive builders
 # --------------------------------------------------------------------------- #
 
-def _bar(pct: float, fill: str, height: int = 16) -> str:
-    """A single horizontal bar as a 2-cell table (fill + track). Email-safe."""
+def _bar(pct: float, fill: str, height: int = 14) -> str:
+    """A rounded pill bar — a rounded track with a rounded fill, matching the HTML
+    .sla-track/.sla-fill. Rounded corners render in modern clients (new Outlook,
+    Apple Mail, Gmail) and degrade to a clean square bar in classic Outlook."""
     pct = max(0.0, min(100.0, pct))
-    cells = ""
+    r = height // 2
+    inner = ""
     if pct > 0:
-        cells += (f'<td width="{pct:.0f}%" bgcolor="{fill}" '
-                  f'style="font-size:0;line-height:0;height:{height}px;">&nbsp;</td>')
-    if pct < 100:
-        cells += (f'<td width="{100 - pct:.0f}%" bgcolor="{TRACK}" '
-                  f'style="font-size:0;line-height:0;height:{height}px;">&nbsp;</td>')
-    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
-            f'style="border:1px solid {LINE};border-collapse:collapse;"><tr>{cells}</tr></table>')
+        inner = (f'<div style="height:{height}px;width:{pct:.1f}%;min-width:2px;'
+                 f'background:{fill};border-radius:{r}px 0 0 {r}px;font-size:0;line-height:0;">&nbsp;</div>')
+    return (f'<div style="height:{height}px;background:{PANEL};border:1px solid {LINE};'
+            f'border-radius:{r}px;overflow:hidden;font-size:0;line-height:0;">{inner}</div>')
 
 
 def _bar_rows(rows: Sequence[Tuple[str, int, str]], max_val: Optional[int] = None) -> str:
@@ -129,6 +129,17 @@ def _card(title: str, caption: str, body: str, top: int = 0) -> str:
     )
 
 
+def _two_col(left: str, right: str, top: int = 16) -> str:
+    """Two equal cards side by side — the email-safe equivalent of the HTML .grid2."""
+    return (
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="margin-top:{top}px;"><tr>'
+        f'<td width="50%" valign="top" style="padding-right:8px;">{left}</td>'
+        f'<td width="50%" valign="top" style="padding-left:8px;">{right}</td>'
+        f'</tr></table>'
+    )
+
+
 def _sec_head(eyebrow: str, title: str, src: str) -> str:
     right = (f'<td align="right" style="{FONT}font-size:11px;color:{MUTED};vertical-align:bottom;">{esc(src)}</td>'
              if src else "<td></td>")
@@ -143,22 +154,27 @@ def _sec_head(eyebrow: str, title: str, src: str) -> str:
 
 
 def _tile(kind: str, label: str, num: str, delta_html: str) -> str:
+    """Returns the tile card (no outer <td>); _tile_grid places it in a sized cell."""
     bg, bd, ink = TILE.get(kind, TILE[""])
     return (
-        f'<td width="33%" valign="top" style="padding:5px;">'
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
-        f'<tr><td bgcolor="{bg}" style="border:1px solid {bd};border-radius:10px;padding:12px 14px;">'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" height="100%">'
+        f'<tr><td bgcolor="{bg}" valign="top" style="border:1px solid {bd};border-radius:10px;padding:12px 14px;">'
         f'<div style="{FONT}font-size:10px;letter-spacing:0.5px;text-transform:uppercase;font-weight:bold;color:{MUTED};">{esc(label)}</div>'
         f'<div style="{FONT}font-size:24px;font-weight:bold;color:{ink};padding-top:4px;">{esc(num)}</div>'
         f'<div style="{FONT}font-size:11px;color:{MUTED};padding-top:5px;">{_inline(delta_html)}</div>'
-        f'</td></tr></table></td>'
+        f'</td></tr></table>'
     )
 
 
 def _tile_grid(tiles: Sequence[str], per_row: int = 3) -> str:
+    w = round(100 / per_row, 2)
     out = ['<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">']
     for i in range(0, len(tiles), per_row):
-        out.append("<tr>" + "".join(tiles[i:i + per_row]) + "</tr>")
+        row = tiles[i:i + per_row]
+        cells = "".join(f'<td width="{w}%" valign="top" style="padding:5px;">{t}</td>' for t in row)
+        # Pad the last row so cells keep their width.
+        cells += "".join(f'<td width="{w}%" style="padding:5px;"></td>' for _ in range(per_row - len(row)))
+        out.append("<tr>" + cells + "</tr>")
     out.append("</table>")
     return "".join(out)
 
@@ -187,6 +203,87 @@ def _num_table(headers: Sequence[str], rows: Sequence[Sequence[str]], first_col_
         f'<tr><td width="{first_col_w}"></td>{"".join("<td></td>" for _ in headers[1:])}</tr>'
         f'<tr>{ths}</tr>{"".join(body)}</table>'
     )
+
+
+def _sparkline_svg(series: Sequence[Tuple[str, Sequence[float]]], labels: Sequence[str],
+                   width: int = 632, height: int = 96) -> str:
+    """Multi-line sparkline as a small, flat inline SVG (Apple Mail / new Outlook /
+    browser render it; classic Outlook strips it — the numeric table below is the
+    fallback). Ported from athena-integrations reports_compliance.generateSparklineSvg.
+    """
+    all_vals = [v for _, vals in series for v in vals]
+    if not all_vals or len(labels) < 2:
+        return ""
+    max_val = max(all_vals) or 1
+    pad_l, pad_r, pad_t, pad_b = 6, 6, 8, 18
+    plot_w, plot_h = width - pad_l - pad_r, height - pad_t - pad_b
+    n = len(labels)
+    def _x(i: int) -> float:
+        return pad_l + (i / (n - 1)) * plot_w
+    def _y(v: float) -> float:
+        return pad_t + plot_h - (v / max_val) * plot_h
+    parts = [f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+             f'xmlns="http://www.w3.org/2000/svg" style="max-width:100%;">']
+    # faint baseline
+    parts.append(f'<line x1="{pad_l}" y1="{pad_t + plot_h}" x2="{width - pad_r}" '
+                 f'y2="{pad_t + plot_h}" stroke="{LINE}" stroke-width="1"/>')
+    for label, vals in series:
+        color = series_color(label)
+        pts = " ".join(f"{_x(i):.1f},{_y(v):.1f}" for i, v in enumerate(vals))
+        parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" '
+                     f'points="{pts}"/>')
+        # end marker
+        parts.append(f'<circle cx="{_x(n - 1):.1f}" cy="{_y(vals[-1]):.1f}" r="3" fill="{color}"/>')
+    # x labels
+    for i, lab in enumerate(labels):
+        anchor = "start" if i == 0 else ("end" if i == n - 1 else "middle")
+        parts.append(f'<text x="{_x(i):.1f}" y="{height - 4}" text-anchor="{anchor}" '
+                     f'font-family="Segoe UI,Arial,sans-serif" font-size="9" fill="{MUTED}">{esc(lab)}</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def series_color(label: str) -> str:
+    key = label.strip().lower()
+    if key.startswith("open") and "week" not in key:
+        return STATUS["opened"]
+    if key.startswith("closed"):
+        return STATUS["closed"]
+    return STATUS["open"]
+
+
+def _stacked_sev_svg(rows: Sequence[Tuple[str, int]], width: int = 632, height: int = 18) -> str:
+    """A single stacked severity bar (crit/high/med/…) as a flat inline SVG.
+    Ported from athena-integrations reports_compliance.generateMiniBarSvg.
+    """
+    total = sum(v for _, v in rows) or 0
+    if total <= 0:
+        return ""
+    parts = [f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+             f'xmlns="http://www.w3.org/2000/svg" style="max-width:100%;">']
+    x = 0.0
+    last = len(rows) - 1
+    for i, (label, val) in enumerate(rows):
+        w = (val / total) * width
+        rx = 3 if (i == 0 or i == last) else 0
+        parts.append(f'<rect x="{x:.1f}" y="0" width="{w:.1f}" height="{height}" '
+                     f'rx="{rx}" fill="{SEV_FILL.get(label, SEV_FILL["Low"])}"/>')
+        x += w
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _chart_img(d: Dict[str, Any], name: str, alt: str) -> Optional[str]:
+    """If a rendered PNG chart is available for this slot, return an <img> for it;
+    otherwise None so the caller falls back to the table/SVG rendering. src is a
+    data: URI (self-contained preview) or cid: reference (inline email image)."""
+    src = (d.get("_chart_src") or {}).get(name)
+    if not src:
+        return None
+    # width:100% so the chart fills its card (the PNG is rendered at 2x, so it
+    # scales down crisply); no fixed max-width that would leave right-side gaps.
+    return (f'<div style="padding:2px 0 4px;"><img src="{esc(src)}" alt="{esc(alt)}" '
+            f'width="100%" style="display:block;width:100%;max-width:100%;height:auto;border:0;"></div>')
 
 
 def _pill(sev: str, label: str) -> str:
@@ -228,7 +325,7 @@ def _exec(d: Dict[str, Any]) -> str:
     ]
     return (
         _sec_head("01 · This week at a glance", "Executive summary", "")
-        + _tile_grid(tiles, 3)
+        + _tile_grid(tiles, 6)
         + f'<div style="{FONT}font-size:12px;color:{MUTED};padding:10px 2px 0;">Running totals across the full '
           "reporting week, not a snapshot. &#9650;/&#9660; compare to the prior week.</div>"
     )
@@ -251,8 +348,8 @@ def _commentary(d: Dict[str, Any]) -> str:
 
 def _legend(items: Sequence[Tuple[str, str]]) -> str:
     spans = "".join(
-        f'<span style="{FONT}font-size:12px;color:{INK2};padding-right:16px;">'
-        f'<span style="display:inline-block;width:10px;height:10px;background:{color};border-radius:2px;">&nbsp;</span> {esc(label)}</span>'
+        f'<span style="{FONT}font-size:12px;color:{INK2};font-weight:550;padding-right:16px;">'
+        f'<span style="display:inline-block;width:11px;height:11px;background:{color};border-radius:3px;">&nbsp;</span> {esc(label)}</span>'
         for label, color in items
     )
     return f'<div style="padding:2px 0 8px;">{spans}</div>'
@@ -311,8 +408,9 @@ def _incidents(d: Dict[str, Any]) -> str:
                        d.get("inc_src", "Jira SECOPS · Security Alert + Security Incident"))]
 
     sev_rows = [(lbl, val, SEV_FILL[lbl]) for lbl, val in d["inc_severity"]]
-    parts.append(_card("Opened by severity", f'This week &middot; {sum(v for _, v in d["inc_severity"]):,} shown',
-                       _bar_rows(sev_rows)))
+    sev_body = _chart_img(d, "inc_severity", "Incidents opened by severity") or _bar_rows(sev_rows)
+    sev_card = _card("Opened by severity", f'This week &middot; {sum(v for _, v in d["inc_severity"]):,} shown',
+                     sev_body)
 
     # 6-week trend (line chart on web) → numeric table
     weeks = d["trend"]
@@ -322,12 +420,37 @@ def _incidents(d: Dict[str, Any]) -> str:
         ["Closed"] + [str(w["closed"]) for w in weeks],
         ["Open at week end"] + [str(w["open"]) for w in weeks],
     ]
-    parts.append(_card("Six-week trend", "Opened, closed &amp; still-open per week",
-                       _num_table(headers, trend_rows, dot_colors=[STATUS["opened"], STATUS["closed"], STATUS["open"]]), top=16))
+    trend_img = _chart_img(d, "trend", "Six-week trend: opened, closed and still-open per week")
+    if trend_img:
+        # HTML legend above the chart image (matches the report; keeps it fixed-size).
+        trend_body = _legend([("Opened", STATUS["opened"]), ("Closed", STATUS["closed"]),
+                              ("Open at week end", STATUS["open"])]) + trend_img
+    else:
+        spark = _sparkline_svg(
+            [("Opened", [w["opened"] for w in weeks]),
+             ("Closed", [w["closed"] for w in weeks]),
+             ("Open at week end", [w["open"] for w in weeks])],
+            [w["label"] for w in weeks])
+        trend_body = _legend([("Opened", STATUS["opened"]), ("Closed", STATUS["closed"]),
+                              ("Open at week end", STATUS["open"])])
+        if spark:
+            trend_body += f'<div style="padding:2px 0 10px;">{spark}</div>'
+        trend_body += _num_table(headers, trend_rows,
+                                 dot_colors=[STATUS["opened"], STATUS["closed"], STATUS["open"]])
+    trend_card = _card("Six-week trend", "Opened, closed &amp; still-open per week", trend_body)
+    parts.append(_two_col(sev_card, trend_card))
+
+    # Severity over time — full-width line chart, mirrors the HTML report.
+    sev_trend_img = _chart_img(d, "sev_trend", "Incidents opened per week, by severity")
+    if sev_trend_img:
+        sev_legend = _legend([(lbl, SEV_FILL[lbl]) for lbl in d.get("sev_trend_labels", [])])
+        parts.append(_card("Severity over time", "Incidents opened per week, by severity",
+                           sev_legend + sev_trend_img, top=16))
 
     if d.get("type_breakdown"):
         type_rows = [(lbl, val, BRAND) for lbl, val in d["type_breakdown"]]
-        parts.append(_card("Incidents by type", "Opened this week, by classification", _bar_rows(type_rows), top=16))
+        type_body = _chart_img(d, "inc_type", "Incidents by type") or _bar_rows(type_rows)
+        parts.append(_card("Incidents by type", "Opened this week, by classification", type_body, top=16))
 
     sla = d.get("sla")
     if sla and sla.get("rows"):
@@ -392,7 +515,7 @@ def _device(d: Dict[str, Any]) -> str:
     body = _meter_rows(dev.get("meters", []))
     if dev.get("note"):
         body += f'<div style="{FONT}font-size:12px;color:{MUTED};padding-top:10px;">{esc(dev["note"])}</div>'
-    return head + _tile_grid(tiles, 2) + _card("Policies, definitions &amp; deployment", "", body, top=12)
+    return head + _tile_grid(tiles, 4) + _card("Policies, definitions &amp; deployment", "", body, top=12)
 
 
 def _endpoint(d: Dict[str, Any]) -> str:
@@ -406,7 +529,7 @@ def _endpoint(d: Dict[str, Any]) -> str:
         _tile("red", "Endpoints at risk", f'{ep["at_risk"]:,}', ep.get("at_risk_note", "")),
         _tile("amber", "Inactive agents", f'{ep["inactive"]:,}', "no heartbeat &gt; 24h"),
     ]
-    return head + _tile_grid(tiles, 2) + _card("Protection coverage", "", _meter_rows(ep.get("meters", [])), top=12)
+    return head + _tile_grid(tiles, 4) + _card("Protection coverage", "", _meter_rows(ep.get("meters", [])), top=12)
 
 
 def _vuln(d: Dict[str, Any]) -> str:
@@ -420,10 +543,11 @@ def _vuln(d: Dict[str, Any]) -> str:
         _tile("green", "Resolved this week", f'{v["resolved"]:,}', v["resolved_delta"]),
         _tile("blue", "Newly detected", f'{v["new"]:,}', f'net <b>{v["net"]:+,}</b> open'),
     ]
-    parts = [head, _tile_grid(tiles, 2)]
+    parts = [head, _tile_grid(tiles, 4)]
     sev_rows = [(lbl, val, SEV_FILL[lbl]) for lbl, val in v["severity"]]
-    parts.append(_card("Open vulnerabilities by severity", f'{v["total_open"]:,} open across the estate',
-                       _bar_rows(sev_rows), top=12))
+    v_sev_body = _chart_img(d, "vuln_severity", "Open vulnerabilities by severity") or _bar_rows(sev_rows)
+    v_sev_card = _card("Open vulnerabilities by severity", f'{v["total_open"]:,} open across the estate',
+                       v_sev_body)
     # top CVEs
     def cve_list(title: str, tint: str, items: Sequence[Sequence[Any]]) -> str:
         rows = "".join(
@@ -436,12 +560,13 @@ def _vuln(d: Dict[str, Any]) -> str:
                 f'<div style="{FONT}font-size:11.5px;font-weight:bold;color:#fff;background:{tint};padding:8px 12px;border-radius:6px 6px 0 0;">{title}</div>'
                 f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAPER}" '
                 f'style="border:1px solid {LINE};border-top:none;border-collapse:collapse;">{rows}</table></td>')
-    parts.append(
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:12px;"><tr>'
+    cve_card = (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>'
         + cve_list(f'Top Critical CVEs &middot; {v["crit_open"]:,} open', SEV_FILL["Critical"], v.get("top_crit", []))
         + cve_list(f'Top High CVEs &middot; {v["high_open"]:,} open', SEV_FILL["High"], v.get("top_high", []))
         + "</tr></table>"
     )
+    parts.append(_two_col(v_sev_card, cve_card, top=12))
     sla = v.get("sla")
     if sla and sla.get("rows"):
         ov = sla.get("overall")
@@ -514,7 +639,7 @@ def render_email(data: Dict[str, Any]) -> str:
         f'<body style="margin:0;padding:0;background:{PAGE};">'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAGE}"><tr>'
         '<td align="center" style="padding:20px 12px;">'
-        '<table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:680px;max-width:680px;">'
+        '<table role="presentation" width="960" cellpadding="0" cellspacing="0" border="0" style="width:960px;max-width:960px;">'
         f'<tr><td>{inner}</td></tr></table>'
         "</td></tr></table></body></html>"
     )

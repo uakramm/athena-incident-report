@@ -1,2 +1,5 @@
 requests>=2.31.0
 python-dotenv>=1.0.0
+# Charts are rendered to PNG so they display inside email clients (Outlook/Gmail
+# strip SVG). If matplotlib is absent, the report falls back to table-based charts.
+matplotlib>=3.7

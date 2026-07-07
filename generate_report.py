@@ -37,6 +37,9 @@ except ImportError:  # optional
     def load_dotenv(*_a, **_k):  # type: ignore
         return False
 
+import base64
+
+import charts
 import render
 
 INC_TYPES = 'issuetype in ("Security Alert", "Security Incident")'
@@ -917,6 +920,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--email-cc", help="Comma-separated Cc override. Env: REPORT_EMAIL_CC.")
     p.add_argument("--email-bcc", help="Comma-separated Bcc override. Env: REPORT_EMAIL_BCC.")
     p.add_argument("--email-subject", help="Subject template ({client} {period} {environment} {tenant}). Env: REPORT_EMAIL_SUBJECT.")
+    p.add_argument("--email-body", choices=["email", "full"],
+                   help="Inline body: 'email' = table-based, renders everywhere (default); "
+                        "'full' = the SVG report inline (charts/colours break in Outlook & Gmail). Env: REPORT_EMAIL_BODY.")
     return p.parse_args(argv)
 
 
@@ -972,23 +978,32 @@ def main(argv: Sequence[str]) -> int:
     # Output stays inside this repo unless an absolute --out is given.
     html_path = anchor(args.out) if args.out else anchor(os.path.join(out_dir, f"{slugify(data['client'])}-{data.get('_period_end', 'report')}.html"))
     os.makedirs(os.path.dirname(html_path), exist_ok=True)
+    report_html = render.render_report(data)
     with open(html_path, "w", encoding="utf-8") as fh:
-        fh.write(render.render_report(data))
+        fh.write(report_html)
     log(f"Wrote {os.path.relpath(html_path, SCRIPT_DIR)}")
     log("For a PDF: open the HTML and Print → Save as PDF.")
+
+    # Charts as PNG so they render inside email clients (Outlook/Gmail strip SVG).
+    charts_png = charts.build_charts(data)
 
     email_path = None
     if args.email:
         import render_email
+        # Self-contained preview: embed PNGs as data: URIs so the file stands alone.
+        data["_chart_src"] = {n: "data:image/png;base64," + base64.b64encode(b).decode("ascii")
+                              for n, b in charts_png.items()}
         email_path = re.sub(r"\.html?$", "", html_path) + "-email.html"
         with open(email_path, "w", encoding="utf-8") as fh:
             fh.write(render_email.render_email(data))
+        data.pop("_chart_src", None)
         log(f"Wrote {os.path.relpath(email_path, SCRIPT_DIR)} (email-safe — open it, select all, copy, paste into Outlook).")
 
     if args.send_email or args.email_dry_run:
         import mailer
+        attachment = (os.path.basename(html_path), report_html)
         try:
-            mailer.send_report_email(data, args, log=log)
+            mailer.send_report_email(data, args, log=log, attachment=attachment, charts=charts_png)
         except mailer.MailerError as exc:
             log(f"Email not sent: {exc}")
             return 2

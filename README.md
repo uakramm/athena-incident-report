@@ -93,8 +93,18 @@ python generate_report.py --env-file .env.neuro --send-email
 
 The sender mailbox is `REPORT_EMAIL_FROM`; the app sends through
 `/users/{REPORT_EMAIL_FROM}/sendMail`. `--email-to` / `--email-cc` / `--email-bcc` /
-`--email-subject` override the `.env` values for a one-off send. The message body is the same
-email-safe HTML rendering as `--email`, so it renders directly in the client's inbox with no attachment.
+`--email-subject` override the `.env` values for a one-off send.
+
+**What gets sent.** Email clients (Outlook, Gmail) strip inline SVG and modern CSS, so the full report's
+charts and colours can't render *inside* an email body. To deliver the pretty report anyway, by default:
+
+- the **inline body** is the email-safe (table-based) rendering, which renders reliably everywhere, and
+- the **full SVG report is attached as an `.html` file** (`REPORT_EMAIL_ATTACH_REPORT=true`) — the client
+  opens it in a browser and sees the complete report with all charts. For a PDF they can then Print → Save as PDF.
+
+Set `REPORT_EMAIL_BODY=full` (or `--email-body full`) to put the SVG report *in the body* instead — it looks
+great in Apple Mail and browser previews, but its charts/colours will be broken in Outlook and Gmail. Set
+`REPORT_EMAIL_ATTACH_REPORT=false` to drop the attachment.
 
 ### Common options
 
