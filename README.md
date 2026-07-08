@@ -1,181 +1,71 @@
 # Weekly Security Operations Report
 
-Generates a client-facing **Weekly Security Operations Report** (HTML → print to PDF) on demand.
-It pulls incident and vulnerability data from a client's **SECOPS Jira project** (built by
-[`security-operations-jira-project-setup`](../security-operations-jira-project-setup)) and lays it out
-in the Athena report style, combining:
+This tool builds the weekly security report from Jira and emails it to the client.
 
-- **Incident management** — Security Alert + Security Incident work items: opened / closed / still-open,
-  severity (Sev-1…Sev-4), a 6-week trend, **MTTD / MTTR**, a **by-type breakdown**, **response-SLA
-  attainment** by severity, and the open + closed queues.
-- **Analyst commentary** — a short written read on the week (the SOC team's value narrative), shown under
-  the executive summary. **Auto-generated** from the week's metrics by default; set `REPORT_COMMENTARY_AUTO=false`
-  to omit, or override the wording via the `commentary` key in `--supplemental` (or `REPORT_COMMENTARY`).
-- **Vulnerability status** — Vulnerability work items: open by severity, resolved vs newly-detected, top CVEs.
-- **Device / endpoint / availability** — not in Jira; supplied via `--supplemental` (Intune / Defender / monitoring).
+## First-time setup (only once)
 
-## Setup
+Open a terminal in this folder and run these three lines.
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate
+**Windows** (open **PowerShell** or **Command Prompt** in this folder):
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env        # Jira site + token, plus per-client config
 ```
 
-`.env` holds credentials **and** per-client config (`JIRA_PROJECT_KEY`, `REPORT_CLIENT`,
-`REPORT_ENVIRONMENT`, `REPORT_TENANT`, `REPORT_SUPPORT_EMAIL`, `REPORT_WEEK_START`,
-`REPORT_INCIDENT_SEVERITIES`). Keep one file per client (`.env.neuro`, `.env.athena`, …) so a run is just:
+**Mac:**
 
 ```bash
-python generate_report.py --env-file .env.neuro --out reports/neuro-2026-07-05.html
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-Any CLI flag overrides its `.env` value.
+## Sending the report
 
-## Quick preview (no Jira needed)
+Every time you open a new terminal, first activate the environment:
+
+**Windows:**
+
+```powershell
+.venv\Scripts\activate
+```
+
+**Mac:**
 
 ```bash
-python generate_report.py --sample --open
+source .venv/bin/activate
 ```
 
-## Generate a client report
+Then send the report (same command on both):
 
-With a per-client `.env` (recommended):
-
-```bash
-python generate_report.py --env-file .env.neuro --open
+```
+python generate_report.py --env-file .env.athena --send-email
 ```
 
-Or with flags:
+That's it — this pulls the latest data from Jira and emails the report out.
 
-```bash
-python generate_report.py \
-  --project-key NSO \
-  --client "Neuro" --environment Production --tenant neuro.athenasecuritygrp.com \
-  --week-start monday \
-  --supplemental supplemental.json
+> On Windows, if `python` isn't recognized, try `py` instead
+> (e.g. `py -m venv .venv` and `py generate_report.py --env-file .env.athena --send-email`).
+
+## Check before you send (optional)
+
+If you just want to see **who the email will go to** without actually sending it,
+run this instead — it shows the recipients and subject but sends nothing:
+
+```
+python generate_report.py --env-file .env.athena --email-dry-run
 ```
 
-## Output
+## Changing who it goes to
 
-The report is a **local HTML file** saved inside this repo (default `reports/<client>-<week-end>.html`,
-or wherever `REPORT_OUTPUT_DIR` / `--out` points). Nothing is uploaded anywhere.
+The recipients live in the **`.env.athena`** file. Open it and edit these lines:
 
-**For a PDF:** open the HTML and **Print → Save as PDF** (Cmd/Ctrl+P). The stylesheet already handles
-page breaks and margins for a clean print.
+- `REPORT_EMAIL_TO=` — the main recipient(s)
+- `REPORT_EMAIL_CC=` — anyone to CC (optional)
 
-**For email** (Outlook / Gmail): add `--email` to also write `<out>-email.html`. The standard report uses
-SVG charts, CSS variables and flexbox — none of which survive an email client — so the email version is a
-separate, table-based, inline-styled rendering (bar charts become coloured table cells; the trend line
-chart becomes a compact numbers table). To send it:
+Put a comma between addresses if there's more than one, for example:
+`REPORT_EMAIL_TO=peter@athenasecuritygrp.com, shelly@athenasecuritygrp.com`
 
-```bash
-python generate_report.py --env-file .env.athena --email
-```
-
-Then **open `…-email.html` in a browser, Select All (Cmd/Ctrl+A), Copy, and Paste into a new Outlook /
-Gmail message.** The formatting comes across and you can send it inline — no attachment needed.
-
-### Sending it automatically with Entra + Microsoft Graph
-
-For a fully hands-off send (no copy/paste), create an Entra app registration with Microsoft Graph
-`Mail.Send` application permission, grant admin consent, then set the `ENTRA_*` / `REPORT_EMAIL_*`
-vars in the client's `.env` (see `.env.example`) and pass `--send-email`. **Nothing is ever sent unless
-you pass this flag** — a normal run only ever writes local files.
-
-```bash
-# Preview the subject/recipients without connecting to Graph or sending anything:
-python generate_report.py --env-file .env.neuro --email-dry-run
-
-# Actually send it:
-python generate_report.py --env-file .env.neuro --send-email
-```
-
-The sender mailbox is `REPORT_EMAIL_FROM`; the app sends through
-`/users/{REPORT_EMAIL_FROM}/sendMail`. `--email-to` / `--email-cc` / `--email-bcc` /
-`--email-subject` override the `.env` values for a one-off send.
-
-**What gets sent.** Email clients (Outlook, Gmail) strip inline SVG and modern CSS, so the full report's
-charts and colours can't render *inside* an email body. To deliver the pretty report anyway, by default:
-
-- the **inline body** is the email-safe (table-based) rendering, which renders reliably everywhere, and
-- the **full SVG report is attached as an `.html` file** (`REPORT_EMAIL_ATTACH_REPORT=true`) — the client
-  opens it in a browser and sees the complete report with all charts. For a PDF they can then Print → Save as PDF.
-
-Set `REPORT_EMAIL_BODY=full` (or `--email-body full`) to put the SVG report *in the body* instead — it looks
-great in Apple Mail and browser previews, but its charts/colours will be broken in Outlook and Gmail. Set
-`REPORT_EMAIL_ATTACH_REPORT=false` to drop the attachment.
-
-### Common options
-
-| Flag | Purpose |
-| --- | --- |
-| `--project-key` | Jira project key for the client (e.g. `NSO`). |
-| `--week-start monday\|sunday` | Day the reporting week starts on. |
-| `--week-of YYYY-MM-DD` | Any date inside the target week. Default: **last complete week**. |
-| `--supplemental FILE.json` | Device / endpoint / availability data — see `supplemental.example.json`. |
-| `--env-file .env.neuro` | Use a per-client credentials file. |
-| `--out-dir DIR` / `--out PATH` | Where to save (defaults to `reports/`, auto-named). |
-| `--email` | Also write an email-safe `…-email.html` for pasting into Outlook / Gmail. |
-| `--open` | Open the report when done. |
-
-### Jira field mapping (override if your names differ)
-
-`--severity-field "Severity"` (Sev-1…4 → Critical/High/Medium/Low) · `--mttr-field "MTTR (Minutes)"` ·
-`--mttd-field "MTTD (Minutes)"` · `--incident-time-field "Incident Time"` ·
-`--incident-type-field "Type of Incident"` (drives the by-type breakdown) · `--vuln-id-field "Vulnerability ID(s)"` ·
-`--source-field components` (`components`, `labels`, or a custom field name).
-
-### Response SLA targets
-
-The **Response SLA attainment** card shows the share of incidents resolved within a per-severity target
-time. Targets are set in minutes (defaults: Critical 240, High 480, Medium 1440, Low 4320):
-
-| Env var | Default (minutes) |
-| --- | --- |
-| `REPORT_SLA_CRITICAL_MINUTES` | `240` |
-| `REPORT_SLA_HIGH_MINUTES` | `480` |
-| `REPORT_SLA_MEDIUM_MINUTES` | `1440` |
-| `REPORT_SLA_LOW_MINUTES` | `4320` |
-
-**MTTD / MTTR** are read from the `MTTD (Minutes)` / `MTTR (Minutes)` number fields (unit `minutes`, the
-default). If a value is empty the script falls back to timestamps (`resolved − created` for MTTR,
-`created − Incident Time` for MTTD).
-
-### Severity mapping (Sev-1…Sev-4)
-
-The `Severity` field means different things per work type, so the two are mapped separately (override the
-`JIRA_SEVERITY_*` / `JIRA_VULN_SEVERITY_*` env vars per tenant — defaults match Athena/SECOPS + Palace):
-
-| Sev value | Incidents / alerts | Vulnerabilities |
-| --- | --- | --- |
-| Sev-1 | Critical (confirmed compromise) | Critical |
-| Sev-2 | **Critical** | High |
-| Sev-3 | High | Medium |
-| Sev-4 | Medium (also Low) | Low |
-
-Because incident Medium and Low both use Sev-4, incidents show **Critical / High / Medium** (no separate
-Low); vulnerabilities show all four. The report logs the resolved mapping on each run.
-
-Set `REPORT_INCIDENT_SEVERITIES=CRITICAL,HIGH` to control which incident severities are included in
-incident totals, trends, MTTD / MTTR, and open / closed incident rows. The default is `CRITICAL,HIGH`.
-
-### Section enablement
-
-Use these env vars to include or omit non-core report sections:
-
-| Env var | Default |
-| --- | --- |
-| `REPORT_ENABLE_DEVICE_MANAGEMENT` | `true` |
-| `REPORT_ENABLE_ENDPOINT_MANAGEMENT` | `true` |
-| `REPORT_ENABLE_VULNERABILITY_STATUS` | `true` |
-| `REPORT_ENABLE_SYSTEM_AVAILABILITY` | `true` |
-
-## Files
-
-- `generate_report.py` — CLI + Jira fetch + orchestration.
-- `render.py` — pure HTML/SVG rendering from a data dict (also powers `--sample`).
-- `render_email.py` — email-safe (table-based, inline-styled) rendering of the same data, for `--email`.
-- `mailer.py` — Microsoft Graph email delivery via an Entra app, for `--send-email`.
-- `report_style.css` — the report stylesheet (light + dark, print-ready).
-- `supplemental.example.json` — shape of the non-Jira data.
+Save the file, then run the send command above.
