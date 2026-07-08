@@ -873,14 +873,37 @@ def _dur_delta(cur: Optional[float], prev: Optional[float]) -> str:
     return f'<b class="{cls}">{arrow} {fmt_duration(abs(diff))}</b> vs last week'
 
 
+def _adf_text(node: Any) -> str:
+    """Flatten Atlassian Document Format (rich text used by description/comments in
+    Jira REST v3) into plain text so a CVE regex can run over it."""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, dict):
+        return (node.get("text") or "") + " " + " ".join(_adf_text(c) for c in node.get("content") or [])
+    if isinstance(node, list):
+        return " ".join(_adf_text(c) for c in node)
+    return ""
+
+
+def _find_cves(text: str) -> set:
+    return {m.upper() for m in CVE_RE.findall(text or "")}
+
+
 def top_cves(cli: JiraClient, jql: str, args: argparse.Namespace, kind: str) -> List[Tuple[str, str, Any]]:
+    """Per ticket, take CVEs from the Vulnerability ID(s) field first; if that field
+    has none, fall back to the description, then to the comments."""
     vid_field = cli.field_id(args.vuln_id_field)
-    fields = ["summary"] + ([vid_field] if vid_field else [])
+    fields = ["description", "comment"] + ([vid_field] if vid_field else [])
     counts: Dict[str, int] = {}
     for it in cli.search(jql, fields, limit=1000):
         f = it.get("fields", {})
-        text = " ".join(str(f.get(x, "")) for x in ["summary", vid_field] if x)
-        for cve in {m.upper() for m in CVE_RE.findall(text)}:
+        cves = _find_cves(str(f.get(vid_field) or "")) if vid_field else set()
+        if not cves:
+            cves = _find_cves(_adf_text(f.get("description")))
+        if not cves:
+            comments = (f.get("comment") or {}).get("comments") or []
+            cves = _find_cves(" ".join(_adf_text(c.get("body")) for c in comments))
+        for cve in cves:
             counts[cve] = counts.get(cve, 0) + 1
     top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
     return [(cve, f"{cli.browse_base}/issues/?jql=" + urllib.parse.quote(f'text ~ "{cve}"'), n) for cve, n in top]
