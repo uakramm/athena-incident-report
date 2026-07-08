@@ -186,14 +186,55 @@ class JiraError(RuntimeError):
     pass
 
 
+# Atlassian OAuth 2.0 endpoints.
+ATLASSIAN_AUTH_URL = "https://auth.atlassian.com/oauth/token"
+ATLASSIAN_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources"
+ATLASSIAN_API_BASE = "https://api.atlassian.com/ex/jira"
+
+
+def fetch_jira_oauth(client_id: str, client_secret: str, cloud_id: str = "",
+                     timeout: int = 30) -> Tuple[str, str]:
+    """Atlassian OAuth 2.0 client-credentials, mirroring athena-pallas: get a Bearer
+    token from auth.atlassian.com, then auto-discover the Jira cloud id via
+    accessible-resources when not provided. Returns (access_token, cloud_id)."""
+    if requests is None:
+        raise JiraError("The 'requests' package is required for OAuth. Run: pip install -r requirements.txt")
+    resp = requests.post(ATLASSIAN_AUTH_URL, json={
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }, timeout=timeout)
+    if resp.status_code != 200:
+        raise JiraError(f"Jira OAuth token request failed: HTTP {resp.status_code}\n{resp.text[:400]}")
+    token = (resp.json() or {}).get("access_token")
+    if not token:
+        raise JiraError("Jira OAuth token response did not include access_token.")
+    if not cloud_id:
+        r = requests.get(ATLASSIAN_RESOURCES_URL, headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
+        if r.status_code != 200:
+            raise JiraError(f"Jira cloud-id discovery failed: HTTP {r.status_code}\n{r.text[:400]}")
+        sites = r.json() or []
+        if not sites:
+            raise JiraError("No accessible Jira sites for this OAuth app — check the service account's access.")
+        cloud_id = sites[0]["id"]
+    return token, cloud_id
+
+
 class JiraClient:
-    def __init__(self, site_url: str, email: str, token: str):
+    def __init__(self, site_url: str, *, email: Optional[str] = None,
+                 token: Optional[str] = None, bearer: Optional[str] = None):
         if requests is None:
             raise JiraError("The 'requests' package is required for live Jira runs. Run: pip install -r requirements.txt")
         self.base = site_url.rstrip("/")
         self.session = requests.Session()
-        self.session.auth = (email, token)
         self.session.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+        if bearer:
+            self.session.headers["Authorization"] = f"Bearer {bearer}"
+        elif email and token:
+            self.session.auth = (email, token)
+        else:
+            raise JiraError("No Jira credentials. Set JIRA_EMAIL + JIRA_API_TOKEN, or "
+                            "JIRA_OAUTH_CLIENT_ID + JIRA_OAUTH_CLIENT_SECRET + JIRA_OAUTH_TOKEN_URL.")
         self._fields: Optional[List[Dict[str, Any]]] = None
 
     def _req(self, method: str, path: str, **kw: Any) -> Any:
@@ -250,6 +291,41 @@ class JiraClient:
             if "startAt" in data and len(out) >= data.get("total", 0):
                 break
         return out[:limit]
+
+
+def jira_site_url() -> str:
+    """Jira site URL, from JIRA_SITE_URL (or JIRA_BASE_URL, as athena-pallas names it)."""
+    return _env("JIRA_SITE_URL", "") or _env("JIRA_BASE_URL", "")
+
+
+def build_jira_client(site_url: str) -> JiraClient:
+    """Authenticate to Jira, auto-detecting the mode from env — same precedence as
+    the athena-pallas backend:
+      1. OAuth 2.0 service account: JIRA_CLIENT_ID + JIRA_CLIENT_SECRET (+ optional
+         JIRA_CLOUD_ID; auto-discovered otherwise).
+      2. Bearer service token:      JIRA_SITE_URL + JIRA_SERVICE_TOKEN.
+      3. API token (basic):         JIRA_SITE_URL + JIRA_EMAIL + JIRA_API_TOKEN."""
+    client_id = _env("JIRA_CLIENT_ID", "")
+    client_secret = os.getenv("JIRA_CLIENT_SECRET") or ""
+    if client_id and client_secret:
+        log("Jira auth: OAuth 2.0 client credentials (service account).")
+        token, cloud_id = fetch_jira_oauth(client_id, client_secret, _env("JIRA_CLOUD_ID", ""))
+        return JiraClient(f"{ATLASSIAN_API_BASE}/{cloud_id}", bearer=token)
+
+    service_token = os.getenv("JIRA_SERVICE_TOKEN")
+    if site_url and service_token:
+        log("Jira auth: Bearer service token.")
+        return JiraClient(site_url, bearer=service_token)
+
+    email = _env("JIRA_EMAIL", "") or _env("JIRA_USER_EMAIL", "")
+    token = os.getenv("JIRA_API_TOKEN")
+    if site_url and email and token:
+        log("Jira auth: API token.")
+        return JiraClient(site_url, email=email, token=token)
+
+    raise JiraError("No Jira credentials. Set JIRA_CLIENT_ID + JIRA_CLIENT_SECRET (OAuth), "
+                    "or JIRA_SITE_URL + JIRA_SERVICE_TOKEN (Bearer), "
+                    "or JIRA_SITE_URL + JIRA_EMAIL + JIRA_API_TOKEN (API token).")
 
 
 # --------------------------------------------------------------------------- #
@@ -989,18 +1065,18 @@ def main(argv: Sequence[str]) -> int:
     if args.sample:
         data = sample_data()
     else:
-        site = os.getenv("JIRA_SITE_URL")
-        email = os.getenv("JIRA_EMAIL")
-        token = os.getenv("JIRA_API_TOKEN")
-        missing = [n for n, v in [("JIRA_SITE_URL", site), ("JIRA_EMAIL", email), ("JIRA_API_TOKEN", token)] if not v]
-        if missing:
-            log(f"Missing env: {', '.join(missing)}. Set them in .env or the environment.")
-            return 2
+        # OAuth mode discovers the site (cloud id) itself, so JIRA_SITE_URL is only
+        # required for the token / service-token auth modes.
+        site = jira_site_url()
         resolve_config(args, site)
         if not args.project_key:
             log("No project key. Pass --project-key or set JIRA_PROJECT_KEY in .env.")
             return 2
-        cli = JiraClient(site, email, token)
+        try:
+            cli = build_jira_client(site)
+        except JiraError as exc:
+            log(str(exc))
+            return 2
         data = build_from_jira(cli, args)
 
     data.setdefault("_sections_enabled", section_enablement())
