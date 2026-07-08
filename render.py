@@ -452,9 +452,11 @@ def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     head = _sec_head(f"{n:02d} · Exposure", "Vulnerability status", "Athena scanning · Jira SECOPS · Vulnerability")
     if not v:
         return "<section>" + head + _pending("Athena scanning") + "</section>"
+    crit_cap = "none open" if v["crit_open"] == 0 else "all patchable"
+    high_cap = v.get("high_note") or ("none open" if v["high_open"] == 0 else "across the estate")
     tiles = (
-        _tile("red", "Critical open", f'{v["crit_open"]:,}', "all patchable") +
-        _tile("amber", "High open", f'{v["high_open"]:,}', v.get("high_note", "")) +
+        _tile("red", "Critical open", f'{v["crit_open"]:,}', crit_cap) +
+        _tile("amber", "High open", f'{v["high_open"]:,}', high_cap) +
         _tile("green", "Resolved this week", f'{v["resolved"]:,}', v["resolved_delta"]) +
         _tile("blue", "Newly detected", f'{v["new"]:,}', f'net <b>{v["net"]:+,}</b> open')
     )

@@ -207,13 +207,15 @@ def _tile(kind: str, label: str, num: str, delta_html: str, small: bool = False)
 
 
 def _tile_grid(tiles: Sequence[str], per_row: int = 3) -> str:
-    w = round(100 / per_row, 2)
-    out = ['<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="table-layout:fixed;">']
+    # Explicit pixel widths summing to the fixed 960px body — percentage widths that
+    # round over 100% (e.g. 6 x 16.67%) make Outlook wrap the last tile to a new row.
+    cell = 960 // per_row
+    out = ['<table role="presentation" width="960" cellpadding="0" cellspacing="0" border="0" style="table-layout:fixed;width:960px;">']
     for i in range(0, len(tiles), per_row):
         row = tiles[i:i + per_row]
-        cells = "".join(f'<td width="{w}%" valign="top" style="padding:6px;">{t}</td>' for t in row)
+        cells = "".join(f'<td width="{cell}" valign="top" style="width:{cell}px;padding:6px;">{t}</td>' for t in row)
         # Pad the last row so cells keep their width.
-        cells += "".join(f'<td width="{w}%" style="padding:6px;"></td>' for _ in range(per_row - len(row)))
+        cells += "".join(f'<td width="{cell}" style="width:{cell}px;padding:6px;"></td>' for _ in range(per_row - len(row)))
         out.append("<tr>" + cells + "</tr>")
     out.append("</table>")
     return "".join(out)
@@ -593,9 +595,11 @@ def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     head = _sec_head(f"{n:02d} · Exposure", "Vulnerability status", "Athena scanning · Jira SECOPS · Vulnerability")
     if not v:
         return head + _pending("Athena scanning")
+    crit_cap = "none open" if v["crit_open"] == 0 else "all patchable"
+    high_cap = v.get("high_note") or ("none open" if v["high_open"] == 0 else "across the estate")
     tiles = [
-        _tile("red", "Critical open", f'{v["crit_open"]:,}', "all patchable"),
-        _tile("amber", "High open", f'{v["high_open"]:,}', v.get("high_note", "")),
+        _tile("red", "Critical open", f'{v["crit_open"]:,}', crit_cap),
+        _tile("amber", "High open", f'{v["high_open"]:,}', high_cap),
         _tile("green", "Resolved this week", f'{v["resolved"]:,}', v["resolved_delta"]),
         _tile("blue", "Newly detected", f'{v["new"]:,}', f'net <b>{v["net"]:+,}</b> open'),
     ]
