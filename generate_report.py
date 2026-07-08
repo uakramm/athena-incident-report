@@ -70,7 +70,7 @@ def _configured_incident_labels(label_to_values: Dict[str, List[str]]) -> List[s
 
 def _configured_vuln_labels(label_to_values: Dict[str, List[str]]) -> List[str]:
     # REPORT_VULN_SEVERITIES, falling back to REPORT_INCIDENT_SEVERITIES; if neither set, show all.
-    raw = (os.getenv("REPORT_VULN_SEVERITIES") or os.getenv("REPORT_INCIDENT_SEVERITIES") or "").strip().strip('"')
+    raw = (os.getenv("REPORT_VULN_SEVERITIES", "CRITICAL,HIGH") or os.getenv("REPORT_INCIDENT_SEVERITIES", "CRITICAL,HIGH") or "").strip().strip('"')
     if not raw or raw.lower() in {"*", "all"}:
         return [label for label in SEV_ORDER if label in label_to_values]
     wanted = {part.strip().upper() for part in re.split(r"[,\s]+", raw) if part.strip()}
@@ -80,10 +80,10 @@ def _configured_vuln_labels(label_to_values: Dict[str, List[str]]) -> List[str]:
 
 def section_enablement() -> Dict[str, bool]:
     return {
-        "device": _env_bool("REPORT_ENABLE_DEVICE_MANAGEMENT", True),
-        "endpoint": _env_bool("REPORT_ENABLE_ENDPOINT_MANAGEMENT", True),
+        "device": _env_bool("REPORT_ENABLE_DEVICE_MANAGEMENT", False),
+        "endpoint": _env_bool("REPORT_ENABLE_ENDPOINT_MANAGEMENT", False),
         "vuln": _env_bool("REPORT_ENABLE_VULNERABILITY_STATUS", True),
-        "availability": _env_bool("REPORT_ENABLE_SYSTEM_AVAILABILITY", True),
+        "availability": _env_bool("REPORT_ENABLE_SYSTEM_AVAILABILITY", False),
     }
 
 
@@ -971,7 +971,7 @@ def resolve_config(args: argparse.Namespace, site: str) -> None:
     args.client = args.client or os.getenv("REPORT_CLIENT") or args.project_key
     args.environment = args.environment or os.getenv("REPORT_ENVIRONMENT") or "Production"
     args.tenant = args.tenant or os.getenv("REPORT_TENANT") or site.replace("https://", "").replace("http://", "")
-    args.support_email = args.support_email or os.getenv("REPORT_SUPPORT_EMAIL") or ""
+    args.support_email = args.support_email or os.getenv("REPORT_SUPPORT_EMAIL") or f"secops@{args.tenant}"
     ws = (args.week_start or os.getenv("REPORT_WEEK_START") or "monday").lower()
     args.week_start = "sunday" if ws.startswith("sun") else "monday"
 
