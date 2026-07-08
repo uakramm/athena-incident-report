@@ -193,10 +193,12 @@ ATLASSIAN_API_BASE = "https://api.atlassian.com/ex/jira"
 
 
 def fetch_jira_oauth(client_id: str, client_secret: str, cloud_id: str = "",
-                     timeout: int = 30) -> Tuple[str, str]:
+                     timeout: int = 30) -> Tuple[str, str, str]:
     """Atlassian OAuth 2.0 client-credentials, mirroring athena-pallas: get a Bearer
     token from auth.atlassian.com, then auto-discover the Jira cloud id via
-    accessible-resources when not provided. Returns (access_token, cloud_id)."""
+    accessible-resources when not provided. Returns (access_token, cloud_id,
+    site_url) — site_url is the human-facing site (e.g. https://x.atlassian.net),
+    empty when a cloud id was supplied and no discovery ran."""
     if requests is None:
         raise JiraError("The 'requests' package is required for OAuth. Run: pip install -r requirements.txt")
     resp = requests.post(ATLASSIAN_AUTH_URL, json={
@@ -209,6 +211,7 @@ def fetch_jira_oauth(client_id: str, client_secret: str, cloud_id: str = "",
     token = (resp.json() or {}).get("access_token")
     if not token:
         raise JiraError("Jira OAuth token response did not include access_token.")
+    site_url = ""
     if not cloud_id:
         r = requests.get(ATLASSIAN_RESOURCES_URL, headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
         if r.status_code != 200:
@@ -217,15 +220,20 @@ def fetch_jira_oauth(client_id: str, client_secret: str, cloud_id: str = "",
         if not sites:
             raise JiraError("No accessible Jira sites for this OAuth app — check the service account's access.")
         cloud_id = sites[0]["id"]
-    return token, cloud_id
+        site_url = sites[0].get("url", "")
+    return token, cloud_id, site_url
 
 
 class JiraClient:
     def __init__(self, site_url: str, *, email: Optional[str] = None,
-                 token: Optional[str] = None, bearer: Optional[str] = None):
+                 token: Optional[str] = None, bearer: Optional[str] = None,
+                 browse_base: Optional[str] = None):
         if requests is None:
             raise JiraError("The 'requests' package is required for live Jira runs. Run: pip install -r requirements.txt")
         self.base = site_url.rstrip("/")
+        # Human-facing site URL for clickable ticket/search links (in OAuth mode the
+        # API base is api.atlassian.com/ex/jira/… which does not open in a browser).
+        self.browse_base = (browse_base or site_url).rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
         if bearer:
@@ -309,8 +317,13 @@ def build_jira_client(site_url: str) -> JiraClient:
     client_secret = os.getenv("JIRA_CLIENT_SECRET") or ""
     if client_id and client_secret:
         log("Jira auth: OAuth 2.0 client credentials (service account).")
-        token, cloud_id = fetch_jira_oauth(client_id, client_secret, _env("JIRA_CLOUD_ID", ""))
-        return JiraClient(f"{ATLASSIAN_API_BASE}/{cloud_id}", bearer=token)
+        token, cloud_id, discovered_site = fetch_jira_oauth(client_id, client_secret, _env("JIRA_CLOUD_ID", ""))
+        # Ticket/search links must point at the real site, not the api.atlassian.com
+        # gateway. Prefer an explicit JIRA_SITE_URL, else the discovered site.
+        browse = site_url or discovered_site
+        if not browse:
+            log("Warning: no site URL for ticket links — set JIRA_SITE_URL for clickable links.")
+        return JiraClient(f"{ATLASSIAN_API_BASE}/{cloud_id}", bearer=token, browse_base=browse)
 
     service_token = os.getenv("JIRA_SERVICE_TOKEN")
     if site_url and service_token:
@@ -665,7 +678,7 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         lbl, cls = sev_label(f)
         created = parse_jira_dt(f.get("created"))
         open_rows.append({
-            "ref": it["key"], "ref_url": f"{cli.base}/browse/{it['key']}",
+            "ref": it["key"], "ref_url": f"{cli.browse_base}/browse/{it['key']}",
             "type": (f.get("issuetype") or {}).get("name", "").replace("Security ", ""),
             "sev": lbl, "sev_class": cls,
             "summary": f.get("summary", ""), "source": source_of(f),
@@ -687,7 +700,7 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             c, r = parse_jira_dt(f.get("created")), parse_jira_dt(f.get("resolutiondate"))
             sec = (r - c).total_seconds() if c and r else None
         closed_rows.append({
-            "ref": it["key"], "ref_url": f"{cli.base}/browse/{it['key']}",
+            "ref": it["key"], "ref_url": f"{cli.browse_base}/browse/{it['key']}",
             "type": (f.get("issuetype") or {}).get("name", "").replace("Security ", ""),
             "sev": lbl, "sev_class": cls, "summary": f.get("summary", ""),
             "source": source_of(f), "ttr": fmt_duration(sec),
@@ -870,7 +883,7 @@ def top_cves(cli: JiraClient, jql: str, args: argparse.Namespace, kind: str) -> 
         for cve in {m.upper() for m in CVE_RE.findall(text)}:
             counts[cve] = counts.get(cve, 0) + 1
     top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
-    return [(cve, f"{cli.base}/issues/?jql=" + urllib.parse.quote(f'text ~ "{cve}"'), n) for cve, n in top]
+    return [(cve, f"{cli.browse_base}/issues/?jql=" + urllib.parse.quote(f'text ~ "{cve}"'), n) for cve, n in top]
 
 
 # --------------------------------------------------------------------------- #
