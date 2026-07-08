@@ -851,7 +851,7 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
 
 def _dur_delta(cur: Optional[float], prev: Optional[float]) -> str:
     if cur is None or prev is None:
-        return "vs last week"
+        return "no prior-week data"
     diff = cur - prev
     if abs(diff) < 30:
         return "no change vs last week"
