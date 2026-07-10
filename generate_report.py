@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 import webbrowser
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -175,7 +176,7 @@ def vulnerability_sev_maps() -> Tuple[Dict[str, str], Dict[str, List[str]]]:
 
 
 def log(msg: str) -> None:
-    print(msg, file=sys.stderr)
+    print(msg, file=sys.stderr, flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -201,11 +202,14 @@ def fetch_jira_oauth(client_id: str, client_secret: str, cloud_id: str = "",
     empty when a cloud id was supplied and no discovery ran."""
     if requests is None:
         raise JiraError("The 'requests' package is required for OAuth. Run: pip install -r requirements.txt")
+    log("Jira OAuth token request start.")
+    started = time.perf_counter()
     resp = requests.post(ATLASSIAN_AUTH_URL, json={
         "grant_type": "client_credentials",
         "client_id": client_id,
         "client_secret": client_secret,
     }, timeout=timeout)
+    log(f"Jira OAuth token request done: HTTP {resp.status_code} in {time.perf_counter() - started:.2f}s.")
     if resp.status_code != 200:
         raise JiraError(f"Jira OAuth token request failed: HTTP {resp.status_code}\n{resp.text[:400]}")
     token = (resp.json() or {}).get("access_token")
@@ -213,7 +217,10 @@ def fetch_jira_oauth(client_id: str, client_secret: str, cloud_id: str = "",
         raise JiraError("Jira OAuth token response did not include access_token.")
     site_url = ""
     if not cloud_id:
+        log("Jira OAuth cloud-id discovery start.")
+        started = time.perf_counter()
         r = requests.get(ATLASSIAN_RESOURCES_URL, headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
+        log(f"Jira OAuth cloud-id discovery done: HTTP {r.status_code} in {time.perf_counter() - started:.2f}s.")
         if r.status_code != 200:
             raise JiraError(f"Jira cloud-id discovery failed: HTTP {r.status_code}\n{r.text[:400]}")
         sites = r.json() or []
@@ -246,14 +253,19 @@ class JiraClient:
         self._fields: Optional[List[Dict[str, Any]]] = None
 
     def _req(self, method: str, path: str, **kw: Any) -> Any:
+        started = time.perf_counter()
+        log(f"Jira HTTP start: {method} {path}")
         r = self.session.request(method, self.base + path, timeout=90, **kw)
+        log(f"Jira HTTP done: {method} {path} -> HTTP {r.status_code} in {time.perf_counter() - started:.2f}s")
         if r.status_code not in (200, 201):
             raise JiraError(f"{method} {path} -> HTTP {r.status_code}\n{r.text[:800]}")
         return r.json() if r.content else None
 
     def fields(self) -> List[Dict[str, Any]]:
         if self._fields is None:
+            log("Jira fields load start.")
             self._fields = self._req("GET", "/rest/api/3/field")
+            log(f"Jira fields load done: {len(self._fields)} field(s).")
         return self._fields
 
     def project_name(self, key: str) -> Optional[str]:
@@ -273,17 +285,25 @@ class JiraClient:
         return None
 
     def count(self, jql: str) -> int:
+        started = time.perf_counter()
+        log(f"Jira count start: {jql}")
         try:
             data = self._req("POST", "/rest/api/3/search/approximate-count", json={"jql": jql})
-            return int(data.get("count", 0))
+            count = int(data.get("count", 0))
         except JiraError:
             data = self._req("GET", "/rest/api/3/search", params={"jql": jql, "maxResults": 0})
-            return int(data.get("total", 0))
+            count = int(data.get("total", 0))
+        log(f"Jira count done: {count} result(s) in {time.perf_counter() - started:.2f}s.")
+        return count
 
     def search(self, jql: str, fields: Sequence[str], limit: int = 1000) -> List[Dict[str, Any]]:
+        started = time.perf_counter()
+        log(f"Jira search start: limit={limit} fields={list(fields)} jql={jql}")
         out: List[Dict[str, Any]] = []
         token: Optional[str] = None
+        page = 0
         while len(out) < limit:
+            page += 1
             body = {"jql": jql, "fields": list(fields), "maxResults": min(100, limit - len(out))}
             if token:
                 body["nextPageToken"] = token
@@ -292,13 +312,17 @@ class JiraClient:
             except JiraError:
                 data = self._req("GET", "/rest/api/3/search",
                                  params={"jql": jql, "fields": ",".join(fields), "maxResults": min(100, limit - len(out)), "startAt": len(out)})
-            out.extend(data.get("issues", []))
+            issues = data.get("issues", [])
+            out.extend(issues)
+            log(f"Jira search page {page}: fetched={len(issues)} accumulated={len(out)}.")
             token = data.get("nextPageToken")
             if data.get("isLast", True) or not data.get("issues") or (not token and "startAt" not in data):
                 break
             if "startAt" in data and len(out) >= data.get("total", 0):
                 break
-        return out[:limit]
+        result = out[:limit]
+        log(f"Jira search done: returned={len(result)} in {time.perf_counter() - started:.2f}s.")
+        return result
 
 
 def jira_site_url() -> str:
@@ -549,7 +573,14 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     anchor = dt.date.fromisoformat(args.week_of) if args.week_of else (now.date() - dt.timedelta(days=7))
     start, end = week_window(anchor, args.week_start)
     p_start, p_end = start - dt.timedelta(days=7), start  # prior week
+    build_started = time.perf_counter()
+    log(
+        "Report build start: "
+        f"project={key} client={args.client} tenant={args.tenant} "
+        f"period={d(start)}..{d(end)} prior={d(p_start)}..{d(p_end)}"
+    )
 
+    log("Report build phase: resolve Jira field ids.")
     sev_field = cli.field_id(args.severity_field) or "Severity"
     mttr_field = cli.field_id(args.mttr_field)
     mttd_field = cli.field_id(args.mttd_field)
@@ -588,18 +619,27 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         return scoped(types, f'created < "{d(e)}"', f'(resolutiondate is EMPTY OR resolutiondate >= "{d(e)}")')
 
     # ---- exec counts ----
+    log("Report build phase: executive incident counts.")
     opened_n = cli.count(incidents_only(opened(INC_TYPES, start, end)))
     closed_n = cli.count(incidents_only(closed(INC_TYPES, start, end)))
     open_n = cli.count(incidents_only(open_at(INC_TYPES, end)))
     p_opened, p_closed, p_open = (cli.count(incidents_only(opened(INC_TYPES, p_start, p_end))),
                                   cli.count(incidents_only(closed(INC_TYPES, p_start, p_end))),
                                   cli.count(incidents_only(open_at(INC_TYPES, p_start))))
+    log(
+        "Executive incident counts done: "
+        f"opened={opened_n} closed={closed_n} open={open_n} "
+        f"prior_opened={p_opened} prior_closed={p_closed} prior_open={p_open}"
+    )
 
     # ---- severity of opened this week ----
+    log("Report build phase: incident severity counts.")
     inc_sev = [(label, cli.count(opened(INC_TYPES, start, end) + " AND " + sev_in(inc_label_values[label]))) for label in inc_labels]
+    log(f"Incident severity counts done: {inc_sev}")
 
     # ---- MTTD / MTTR (Jira fields, fallback to timestamps) ----
     def avg_metric(jql: str, field_id: Optional[str], kind: str) -> Optional[float]:
+        log(f"Report build metric start: {kind} field={field_id} jql={jql}")
         want = [f for f in ["created", "resolutiondate", field_id, itime_field] if f]
         issues = cli.search(jql, want, limit=2000)
         vals: List[float] = []
@@ -616,14 +656,19 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
                     sec = (created - itime).total_seconds() if created and itime else None
             if sec is not None and sec >= 0:
                 vals.append(sec)
-        return sum(vals) / len(vals) if vals else None
+        avg = sum(vals) / len(vals) if vals else None
+        log(f"Report build metric done: {kind} issue_count={len(issues)} usable_values={len(vals)} avg_seconds={avg}")
+        return avg
 
+    log("Report build phase: MTTD/MTTR metrics.")
     mttr = avg_metric(incidents_only(closed(INC_TYPES, start, end)), mttr_field, "mttr")
     mttd = avg_metric(incidents_only(opened(INC_TYPES, start, end)), mttd_field, "mttd")
     p_mttr = avg_metric(incidents_only(closed(INC_TYPES, p_start, p_end)), mttr_field, "mttr")
     p_mttd = avg_metric(incidents_only(opened(INC_TYPES, p_start, p_end)), mttd_field, "mttd")
+    log(f"MTTD/MTTR metrics done: mttr={fmt_duration(mttr)} mttd={fmt_duration(mttd)} prior_mttr={fmt_duration(p_mttr)} prior_mttd={fmt_duration(p_mttd)}")
 
     # ---- 6-week trend ----
+    log("Report build phase: 6-week incident trend.")
     trend = []
     for i in range(6):
         ws = start - dt.timedelta(days=7 * (5 - i))
@@ -634,8 +679,10 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             "closed": cli.count(incidents_only(closed(INC_TYPES, ws, we))),
             "open": cli.count(incidents_only(open_at(INC_TYPES, we))),
         })
+    log(f"6-week incident trend done: {trend}")
 
     # ---- severity over time (opened per week by severity) ----
+    log("Report build phase: severity trend.")
     sev_trend = []
     for i in range(6):
         ws = start - dt.timedelta(days=7 * (5 - i))
@@ -644,8 +691,10 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         for label in inc_labels:
             row[label] = cli.count(opened(INC_TYPES, ws, we) + " AND " + sev_in(inc_label_values[label]))
         sev_trend.append(row)
+    log(f"Severity trend done: {sev_trend}")
 
     # ---- open incidents detail ----
+    log("Report build phase: open incident detail.")
     src_field = cli.field_id(args.source_field) if args.source_field not in ("components", "labels") else args.source_field
     det_fields = ["summary", "issuetype", "status", "created", "components", "labels", sev_field]
     if src_field and src_field not in det_fields:
@@ -685,8 +734,10 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             "opened": strip_leading_zero(created.strftime("%d %b %H:%M")) if created else "—",
             "age": fmt_age(created, now), "status": (f.get("status") or {}).get("name", ""),
         })
+    log(f"Open incident detail done: issue_count={len(open_issues)} row_count={len(open_rows)}")
 
     # ---- closed selected ----
+    log("Report build phase: closed incident detail.")
     closed_fields = ["summary", "issuetype", sev_field] + ([mttr_field] if mttr_field else []) + ["created", "resolutiondate", "components", "labels"]
     closed_issues = cli.search(
         incidents_only(closed(INC_TYPES, start, end)) + f' ORDER BY "{args.severity_field}" ASC, resolutiondate DESC',
@@ -705,8 +756,10 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             "sev": lbl, "sev_class": cls, "summary": f.get("summary", ""),
             "source": source_of(f), "ttr": fmt_duration(sec),
         })
+    log(f"Closed incident detail done: issue_count={len(closed_issues)} row_count={len(closed_rows)}")
 
     # ---- incidents by type (opened this week, grouped by the Type-of-Incident field) ----
+    log("Report build phase: incident type breakdown.")
     type_field = cli.field_id(args.incident_type_field)
     type_breakdown: List[Tuple[str, int]] = []
     if type_field:
@@ -728,8 +781,10 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             for name in (names or ["Unclassified"]):
                 tally[name] = tally.get(name, 0) + 1
         type_breakdown = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+    log(f"Incident type breakdown done: type_field={type_field} rows={type_breakdown}")
 
     # ---- response SLA attainment (of incidents closed this week, % resolved within target) ----
+    log("Report build phase: incident SLA.")
     sla_secs = sla_targets()
     sla_buckets: Dict[str, List[int]] = {label: [0, 0] for label in inc_labels}  # label -> [met, total]
     for it in cli.search(incidents_only(closed(INC_TYPES, start, end)),
@@ -761,8 +816,10 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         sla_rows.append((f"{label} ≤ {fmt_sla_target(sla_secs[label])}", met, total, kind))
     sla = ({"rows": sla_rows, "met": sla_met, "total": sla_total,
             "overall": round(sla_met / sla_total * 100)} if sla_rows else None)
+    log(f"Incident SLA done: {sla}")
 
     # ---- vulnerabilities ----
+    log("Report build phase: vulnerability counts.")
     vuln_sev, total_open, counts_by_label = [], 0, {}
     for label in vuln_labels:
         c = cli.count(scoped(VULN_TYPE, "statusCategory != Done", "resolution is EMPTY", sev_in(vuln_label_values[label])))
@@ -772,8 +829,14 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     v_resolved = cli.count(closed(VULN_TYPE, start, end))
     v_new = cli.count(opened(VULN_TYPE, start, end))
     v_resolved_prev = cli.count(closed(VULN_TYPE, p_start, p_end))
+    log(
+        "Vulnerability counts done: "
+        f"severity={vuln_sev} total_open={total_open} resolved={v_resolved} "
+        f"new={v_new} prior_resolved={v_resolved_prev}"
+    )
 
     # ---- vulnerability remediation SLA (of vulns resolved this week, % remediated within target) ----
+    log("Report build phase: vulnerability SLA.")
     vuln_sla_secs = vuln_sla_targets()
     vuln_sla_buckets: Dict[str, List[int]] = {label: [0, 0] for label in vuln_labels}  # label -> [met, total]
     for it in cli.search(closed(VULN_TYPE, start, end), [sev_field, "created", "resolutiondate"], limit=2000):
@@ -803,8 +866,10 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         vuln_sla_rows.append((f"{label} ≤ {fmt_sla_target(vuln_sla_secs[label])}", met, total, kind))
     vuln_sla = ({"rows": vuln_sla_rows, "met": vsla_met, "total": vsla_total,
                  "overall": round(vsla_met / vsla_total * 100)} if vuln_sla_rows else None)
+    log(f"Vulnerability SLA done: {vuln_sla}")
 
     # ---- analyst commentary: manual override wins, else auto-generate from the metrics ----
+    log("Report build phase: commentary.")
     include_vuln = section_enablement().get("vuln", True)
     manual_commentary = ((args.supplemental_data or {}).get("commentary") or os.getenv("REPORT_COMMENTARY") or "").strip()
     if manual_commentary:
@@ -816,11 +881,16 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             include_vuln=include_vuln, v_resolved=v_resolved, v_new=v_new, vuln_sla=vuln_sla)
     else:
         commentary = ""
+    log(f"Commentary done: source={'manual' if manual_commentary else ('auto' if commentary else 'empty')} length={len(commentary)}")
 
+    log("Report build phase: top CVEs.")
     top_crit = top_cves(cli, scoped(VULN_TYPE, "statusCategory != Done", sev_in(vuln_label_values.get("Critical", ["Sev-1"]))), args, "crit")
     top_high = top_cves(cli, scoped(VULN_TYPE, "statusCategory != Done", sev_in(vuln_label_values.get("High", ["Sev-2"]))), args, "high")
+    log(f"Top CVEs done: critical={top_crit} high={top_high}")
 
+    log("Report build phase: project metadata.")
     project_name = os.getenv("REPORT_PROJECT_NAME") or cli.project_name(key) or ""
+    log(f"Project metadata done: project_name={project_name}")
     data: Dict[str, Any] = {
         "client": args.client, "environment": args.environment, "tenant": args.tenant,
         "project_key": key, "project_name": project_name,
@@ -859,6 +929,7 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         for section in ("device", "endpoint", "availability"):
             if section in args.supplemental_data:
                 data[section] = args.supplemental_data[section]
+    log(f"Report build done: elapsed={time.perf_counter() - build_started:.2f}s sections={section_enablement()}")
     return data
 
 
@@ -1089,27 +1160,49 @@ def resolve_config(args: argparse.Namespace, site: str) -> None:
 
 
 def main(argv: Sequence[str]) -> int:
+    main_started = time.perf_counter()
+    log(f"Report main start: argv_flags={[arg for arg in argv if str(arg).startswith('--')]}")
     args = parse_args(argv)
+    log(
+        "Report args parsed: "
+        f"sample={args.sample} out_dir={args.out_dir} week_of={args.week_of} "
+        f"send_email={args.send_email} email_dry_run={args.email_dry_run} "
+        f"email_preview={args.email} project_key={args.project_key} client={args.client} tenant={args.tenant}"
+    )
     load_dotenv(args.env_file, override=True) if args.env_file else load_dotenv()
+    log(f"Dotenv load done: explicit_env_file={bool(args.env_file)}")
     out_dir = args.out_dir or os.getenv("REPORT_OUTPUT_DIR") or "reports"
+    log(f"Output directory resolved: {out_dir}")
 
     args.supplemental_data = {}
     if args.supplemental:
+        log(f"Supplemental load start: {args.supplemental}")
         with open(args.supplemental, "r", encoding="utf-8") as fh:
             args.supplemental_data = json.load(fh)
+        log(f"Supplemental load done: keys={sorted(args.supplemental_data.keys())}")
 
     if args.sample:
+        log("Sample data build start.")
         data = sample_data()
+        log("Sample data build done.")
     else:
         # OAuth mode discovers the site (cloud id) itself, so JIRA_SITE_URL is only
         # required for the token / service-token auth modes.
         site = jira_site_url()
+        log(f"Jira site resolved: configured={bool(site)}")
         resolve_config(args, site)
+        log(
+            "Report config resolved: "
+            f"project_key={args.project_key} client={args.client} tenant={args.tenant} "
+            f"environment={args.environment} support_email={args.support_email} week_start={args.week_start}"
+        )
         if not args.project_key:
             log("No project key. Pass --project-key or set JIRA_PROJECT_KEY in .env.")
             return 2
         try:
+            log("Jira client build start.")
             cli = build_jira_client(site)
+            log("Jira client build done.")
         except JiraError as exc:
             log(str(exc))
             return 2
@@ -1119,6 +1212,7 @@ def main(argv: Sequence[str]) -> int:
 
     # Output stays inside this repo unless an absolute --out is given.
     html_path = anchor(args.out) if args.out else anchor(os.path.join(out_dir, f"{slugify(data['client'])}-{data.get('_period_end', 'report')}.html"))
+    log(f"Render start: html_path={html_path}")
     os.makedirs(os.path.dirname(html_path), exist_ok=True)
     report_html = render.render_report(data)
     with open(html_path, "w", encoding="utf-8") as fh:
@@ -1127,10 +1221,13 @@ def main(argv: Sequence[str]) -> int:
     log("For a PDF: open the HTML and Print → Save as PDF.")
 
     # Charts as PNG so they render inside email clients (Outlook/Gmail strip SVG).
+    log("Chart render start.")
     charts_png = charts.build_charts(data)
+    log(f"Chart render done: chart_count={len(charts_png)} chart_names={sorted(charts_png)}")
 
     email_path = None
     if args.email:
+        log("Email preview render start.")
         import render_email
         # Self-contained preview: embed PNGs as data: URIs so the file stands alone.
         data["_chart_src"] = {n: "data:image/png;base64," + base64.b64encode(b).decode("ascii")
@@ -1142,6 +1239,7 @@ def main(argv: Sequence[str]) -> int:
         log(f"Wrote {os.path.relpath(email_path, SCRIPT_DIR)} (email-safe — open it, select all, copy, paste into Outlook).")
 
     if args.send_email or args.email_dry_run:
+        log(f"Email step start: send_email={args.send_email} dry_run={args.email_dry_run}")
         import mailer
         attachment = (os.path.basename(html_path), report_html)
         try:
@@ -1149,9 +1247,11 @@ def main(argv: Sequence[str]) -> int:
         except mailer.MailerError as exc:
             log(f"Email not sent: {exc}")
             return 2
+        log("Email step done.")
 
     if args.open_after:
         webbrowser.open("file://" + os.path.abspath(email_path or html_path))
+    log(f"Report main done: elapsed={time.perf_counter() - main_started:.2f}s")
     return 0
 
 

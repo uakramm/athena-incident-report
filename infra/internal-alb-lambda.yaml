@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Internal ALB to Lambda for manually triggering the Athena incident report.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: athena-incident-report
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9-]{2,48}$"
+  EnvironmentName:
+    Type: String
+    Default: manual
+    AllowedPattern: "^[a-zA-Z0-9-]{2,32}$"
+  SourceCodeS3Bucket:
+    Type: String
+    Description: S3 bucket containing the Lambda source zip.
+  SourceCodeS3Key:
+    Type: String
+    Description: S3 key for the Lambda source zip.
+  DependenciesLayerS3Bucket:
+    Type: String
+    Description: S3 bucket containing the Lambda dependencies layer zip.
+  DependenciesLayerS3Key:
+    Type: String
+    Description: S3 key for the Lambda dependencies layer zip.
+  LambdaRuntime:
+    Type: String
+    Default: python3.12
+    AllowedValues: [python3.12, python3.13]
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC that is reachable from the Client VPN.
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Existing private subnets for the internal ALB.
+  ClientVpnCidr:
+    Type: String
+    Description: Source CIDR allowed to call the internal ALB. For this AWS Client VPN setup, use the VPC/target CIDR seen by the ALB, not the client-assigned VPN pool.
+    AllowedPattern: "^(([0-9]{1,3}\\.){3}[0-9]{1,3})/[0-9]{1,2}$"
+  ListenerPort:
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 65535
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: Optional ACM certificate ARN. When set, the ALB listener uses HTTPS.
+  LambdaMemorySize:
+    Type: Number
+    Default: 1024
+    MinValue: 128
+    MaxValue: 10240
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 900
+    MinValue: 30
+    MaxValue: 900
+  ReservedConcurrentExecutions:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 10
+  AllowGet:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Allow GET /run. POST /run is always allowed.
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+
+Conditions:
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+  UseHttp: !Equals [!Ref CertificateArn, ""]
+
+Resources:
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${AppName}-${EnvironmentName} internal ALB access from Client VPN"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ListenerPort
+          ToPort: !Ref ListenerPort
+          CidrIp: !Ref ClientVpnCidr
+          Description: Client VPN access to manual report trigger
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${AppName}-${EnvironmentName}-alb-sg"
+        - Key: Application
+          Value: !Ref AppName
+
+  ReportLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internal
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets: !Ref SubnetIds
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: !Sub "${LambdaTimeoutSeconds}"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AppName}-${EnvironmentName}-internal"
+        - Key: Application
+          Value: !Ref AppName
+
+  ReportExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: write-cloudwatch-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-${EnvironmentName}:*"
+        - PolicyName: read-tenant-report-config-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:athena-incident-report/*/config-*"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+
+  ReportLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AppName}-${EnvironmentName}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+
+  ReportFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ReportLogGroup
+    Properties:
+      FunctionName: !Sub "${AppName}-${EnvironmentName}"
+      Code:
+        S3Bucket: !Ref SourceCodeS3Bucket
+        S3Key: !Ref SourceCodeS3Key
+      Role: !GetAtt ReportExecutionRole.Arn
+      Runtime: !Ref LambdaRuntime
+      Handler: lambda_handler.handler
+      MemorySize: !Ref LambdaMemorySize
+      Timeout: !Ref LambdaTimeoutSeconds
+      ReservedConcurrentExecutions: !Ref ReservedConcurrentExecutions
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref ReportDependenciesLayer
+      Environment:
+        Variables:
+          REPORT_ALLOW_GET: !Ref AllowGet
+          REPORT_LAMBDA_SEND_EMAIL: "true"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+
+  ReportDependenciesLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub "${AppName}-${EnvironmentName}-dependencies"
+      Description: Python dependencies for the Athena incident report Lambda.
+      Content:
+        S3Bucket: !Ref DependenciesLayerS3Bucket
+        S3Key: !Ref DependenciesLayerS3Key
+      CompatibleArchitectures:
+        - x86_64
+      CompatibleRuntimes:
+        - !Ref LambdaRuntime
+
+  ReportTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: lambda
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: lambda.multi_value_headers.enabled
+          Value: "false"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AppName}-${EnvironmentName}-lambda"
+        - Key: Application
+          Value: !Ref AppName
+
+  ReportInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ReportFunction.Arn
+      Principal: elasticloadbalancing.amazonaws.com
+      SourceArn: !Ref ReportTargetGroup
+      SourceAccount: !Ref AWS::AccountId
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: UseHttp
+    DependsOn: ReportInvokePermission
+    Properties:
+      LoadBalancerArn: !Ref ReportLoadBalancer
+      Port: !Ref ListenerPort
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ReportTargetGroup
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
+    DependsOn: ReportInvokePermission
+    Properties:
+      LoadBalancerArn: !Ref ReportLoadBalancer
+      Port: !Ref ListenerPort
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ReportTargetGroup
+
+Outputs:
+  LoadBalancerDnsName:
+    Description: Internal ALB DNS name. It resolves inside the VPC/VPN network path.
+    Value: !GetAtt ReportLoadBalancer.DNSName
+  RunUrlPath:
+    Description: Manual trigger path.
+    Value: /run
+  HealthUrlPath:
+    Description: Health path.
+    Value: /health
+  LambdaFunctionName:
+    Value: !Ref ReportFunction
+  LambdaFunctionArn:
+    Value: !GetAtt ReportFunction.Arn
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+  TargetGroupArn:
+    Value: !Ref ReportTargetGroup
