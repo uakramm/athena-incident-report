@@ -175,8 +175,34 @@ def vulnerability_sev_maps() -> Tuple[Dict[str, str], Dict[str, List[str]]]:
     ])
 
 
-def log(msg: str) -> None:
-    print(msg, file=sys.stderr, flush=True)
+_LOG_LEVELS = {
+    "DEBUG": 10,
+    "INFO": 20,
+    "WARN": 30,
+    "WARNING": 30,
+    "ERROR": 40,
+    "CRITICAL": 50,
+}
+
+
+def _configured_log_level() -> str:
+    raw = (os.getenv("REPORT_LOG_LEVEL") or os.getenv("LOG_LEVEL") or "INFO").strip().strip('"').upper()
+    return raw if raw in _LOG_LEVELS else "INFO"
+
+
+def _log_enabled(level: str) -> bool:
+    configured = _LOG_LEVELS[_configured_log_level()]
+    requested = _LOG_LEVELS.get((level or "INFO").upper(), _LOG_LEVELS["INFO"])
+    return requested >= configured
+
+
+def log(msg: str, level: str = "INFO") -> None:
+    if _log_enabled(level):
+        print(msg, file=sys.stderr, flush=True)
+
+
+def debug(msg: str) -> None:
+    log(msg, level="DEBUG")
 
 
 # --------------------------------------------------------------------------- #
@@ -202,14 +228,14 @@ def fetch_jira_oauth(client_id: str, client_secret: str, cloud_id: str = "",
     empty when a cloud id was supplied and no discovery ran."""
     if requests is None:
         raise JiraError("The 'requests' package is required for OAuth. Run: pip install -r requirements.txt")
-    log("Jira OAuth token request start.")
+    debug("Jira OAuth token request start.")
     started = time.perf_counter()
     resp = requests.post(ATLASSIAN_AUTH_URL, json={
         "grant_type": "client_credentials",
         "client_id": client_id,
         "client_secret": client_secret,
     }, timeout=timeout)
-    log(f"Jira OAuth token request done: HTTP {resp.status_code} in {time.perf_counter() - started:.2f}s.")
+    debug(f"Jira OAuth token request done: HTTP {resp.status_code} in {time.perf_counter() - started:.2f}s.")
     if resp.status_code != 200:
         raise JiraError(f"Jira OAuth token request failed: HTTP {resp.status_code}\n{resp.text[:400]}")
     token = (resp.json() or {}).get("access_token")
@@ -217,10 +243,10 @@ def fetch_jira_oauth(client_id: str, client_secret: str, cloud_id: str = "",
         raise JiraError("Jira OAuth token response did not include access_token.")
     site_url = ""
     if not cloud_id:
-        log("Jira OAuth cloud-id discovery start.")
+        debug("Jira OAuth cloud-id discovery start.")
         started = time.perf_counter()
         r = requests.get(ATLASSIAN_RESOURCES_URL, headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
-        log(f"Jira OAuth cloud-id discovery done: HTTP {r.status_code} in {time.perf_counter() - started:.2f}s.")
+        debug(f"Jira OAuth cloud-id discovery done: HTTP {r.status_code} in {time.perf_counter() - started:.2f}s.")
         if r.status_code != 200:
             raise JiraError(f"Jira cloud-id discovery failed: HTTP {r.status_code}\n{r.text[:400]}")
         sites = r.json() or []
@@ -254,18 +280,18 @@ class JiraClient:
 
     def _req(self, method: str, path: str, **kw: Any) -> Any:
         started = time.perf_counter()
-        log(f"Jira HTTP start: {method} {path}")
+        debug(f"Jira HTTP start: {method} {path}")
         r = self.session.request(method, self.base + path, timeout=90, **kw)
-        log(f"Jira HTTP done: {method} {path} -> HTTP {r.status_code} in {time.perf_counter() - started:.2f}s")
+        debug(f"Jira HTTP done: {method} {path} -> HTTP {r.status_code} in {time.perf_counter() - started:.2f}s")
         if r.status_code not in (200, 201):
             raise JiraError(f"{method} {path} -> HTTP {r.status_code}\n{r.text[:800]}")
         return r.json() if r.content else None
 
     def fields(self) -> List[Dict[str, Any]]:
         if self._fields is None:
-            log("Jira fields load start.")
+            debug("Jira fields load start.")
             self._fields = self._req("GET", "/rest/api/3/field")
-            log(f"Jira fields load done: {len(self._fields)} field(s).")
+            debug(f"Jira fields load done: {len(self._fields)} field(s).")
         return self._fields
 
     def project_name(self, key: str) -> Optional[str]:
@@ -286,19 +312,19 @@ class JiraClient:
 
     def count(self, jql: str) -> int:
         started = time.perf_counter()
-        log(f"Jira count start: {jql}")
+        debug(f"Jira count start: {jql}")
         try:
             data = self._req("POST", "/rest/api/3/search/approximate-count", json={"jql": jql})
             count = int(data.get("count", 0))
         except JiraError:
             data = self._req("GET", "/rest/api/3/search", params={"jql": jql, "maxResults": 0})
             count = int(data.get("total", 0))
-        log(f"Jira count done: {count} result(s) in {time.perf_counter() - started:.2f}s.")
+        debug(f"Jira count done: {count} result(s) in {time.perf_counter() - started:.2f}s.")
         return count
 
     def search(self, jql: str, fields: Sequence[str], limit: int = 1000) -> List[Dict[str, Any]]:
         started = time.perf_counter()
-        log(f"Jira search start: limit={limit} fields={list(fields)} jql={jql}")
+        debug(f"Jira search start: limit={limit} fields={list(fields)} jql={jql}")
         out: List[Dict[str, Any]] = []
         token: Optional[str] = None
         page = 0
@@ -314,14 +340,14 @@ class JiraClient:
                                  params={"jql": jql, "fields": ",".join(fields), "maxResults": min(100, limit - len(out)), "startAt": len(out)})
             issues = data.get("issues", [])
             out.extend(issues)
-            log(f"Jira search page {page}: fetched={len(issues)} accumulated={len(out)}.")
+            debug(f"Jira search page {page}: fetched={len(issues)} accumulated={len(out)}.")
             token = data.get("nextPageToken")
             if data.get("isLast", True) or not data.get("issues") or (not token and "startAt" not in data):
                 break
             if "startAt" in data and len(out) >= data.get("total", 0):
                 break
         result = out[:limit]
-        log(f"Jira search done: returned={len(result)} in {time.perf_counter() - started:.2f}s.")
+        debug(f"Jira search done: returned={len(result)} in {time.perf_counter() - started:.2f}s.")
         return result
 
 
@@ -346,7 +372,7 @@ def build_jira_client(site_url: str) -> JiraClient:
         # gateway. Prefer an explicit JIRA_SITE_URL, else the discovered site.
         browse = site_url or discovered_site
         if not browse:
-            log("Warning: no site URL for ticket links — set JIRA_SITE_URL for clickable links.")
+            log("Warning: no site URL for ticket links — set JIRA_SITE_URL for clickable links.", level="WARN")
         return JiraClient(f"{ATLASSIAN_API_BASE}/{cloud_id}", bearer=token, browse_base=browse)
 
     service_token = os.getenv("JIRA_SERVICE_TOKEN")
@@ -639,7 +665,7 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
 
     # ---- MTTD / MTTR (Jira fields, fallback to timestamps) ----
     def avg_metric(jql: str, field_id: Optional[str], kind: str) -> Optional[float]:
-        log(f"Report build metric start: {kind} field={field_id} jql={jql}")
+        debug(f"Report build metric start: {kind} field={field_id} jql={jql}")
         want = [f for f in ["created", "resolutiondate", field_id, itime_field] if f]
         issues = cli.search(jql, want, limit=2000)
         vals: List[float] = []
@@ -1161,7 +1187,7 @@ def resolve_config(args: argparse.Namespace, site: str) -> None:
 
 def main(argv: Sequence[str]) -> int:
     main_started = time.perf_counter()
-    log(f"Report main start: argv_flags={[arg for arg in argv if str(arg).startswith('--')]}")
+    log(f"Report main start: log_level={_configured_log_level()} argv_flags={[arg for arg in argv if str(arg).startswith('--')]}")
     args = parse_args(argv)
     log(
         "Report args parsed: "
@@ -1197,14 +1223,14 @@ def main(argv: Sequence[str]) -> int:
             f"environment={args.environment} support_email={args.support_email} week_start={args.week_start}"
         )
         if not args.project_key:
-            log("No project key. Pass --project-key or set JIRA_PROJECT_KEY in .env.")
+            log("No project key. Pass --project-key or set JIRA_PROJECT_KEY in .env.", level="ERROR")
             return 2
         try:
             log("Jira client build start.")
             cli = build_jira_client(site)
             log("Jira client build done.")
         except JiraError as exc:
-            log(str(exc))
+            log(str(exc), level="ERROR")
             return 2
         data = build_from_jira(cli, args)
 
@@ -1245,7 +1271,7 @@ def main(argv: Sequence[str]) -> int:
         try:
             mailer.send_report_email(data, args, log=log, attachment=attachment, charts=charts_png)
         except mailer.MailerError as exc:
-            log(f"Email not sent: {exc}")
+            log(f"Email not sent: {exc}", level="ERROR")
             return 2
         log("Email step done.")
 

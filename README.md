@@ -126,6 +126,10 @@ secret and must be passed on every API call. If the secret contains
 `Authorization: Bearer ...`; if it is absent, the endpoint relies only on VPN/ALB
 network access.
 
+Set `REPORT_LOG_LEVEL=DEBUG` in a tenant secret only when you need the detailed
+Jira API trace in CloudWatch. The default `INFO` level keeps the high-level
+report progress logs and hides per-request Jira HTTP/search/count/JQL details.
+
 To create or update a tenant config secret from a local env file:
 
 ```bash
