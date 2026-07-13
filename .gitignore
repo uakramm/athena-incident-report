@@ -1,6 +1,8 @@
 .claude
 .DS_Store
 .aws-build/
+.report-api-url
+.report-api-id
 .env
 .env.*
 !.env.example

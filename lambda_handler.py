@@ -1,4 +1,4 @@
-"""AWS Lambda entry point for manual report generation behind an internal ALB."""
+"""AWS Lambda entry points for private API dispatch and report generation."""
 from __future__ import annotations
 
 import base64
@@ -15,9 +15,12 @@ import traceback
 from urllib.parse import parse_qs
 from typing import Any, Dict, List, Mapping, Optional
 
-import generate_report
-
 REQUEST_ONLY_ENV_KEYS = ("REPORT_EMAIL_TO", "REPORT_EMAIL_CC")
+PROTECTED_SECRET_ENV_KEYS = {
+    "REPORT_ALLOW_GET",
+    "REPORT_LAMBDA_SEND_EMAIL",
+    "REPORT_WORKER_FUNCTION_NAME",
+}
 TENANT_SECRET_TEMPLATE = "athena-incident-report/{tenant}/config"
 TENANT_KEY_RE = re.compile(r"^[a-z0-9_.-]+$")
 LOADED_SECRET_ENV_KEYS: set[str] = set()
@@ -141,19 +144,9 @@ def _header(headers: Optional[Mapping[str, str]], name: str) -> str:
 
 
 def _json_response(status: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-    reason = {
-        200: "OK",
-        202: "Accepted",
-        400: "Bad Request",
-        401: "Unauthorized",
-        404: "Not Found",
-        405: "Method Not Allowed",
-        500: "Internal Server Error",
-    }.get(status, "OK")
     return {
         "isBase64Encoded": False,
         "statusCode": status,
-        "statusDescription": f"{status} {reason}",
         "headers": {
             "Content-Type": "application/json",
             "Cache-Control": "no-store",
@@ -301,6 +294,8 @@ def _load_secret_env(secret_id: str) -> List[str]:
     for key, val in data.items():
         if val is not None:
             env_key = str(key)
+            if env_key in PROTECTED_SECRET_ENV_KEYS or env_key.startswith("AWS_"):
+                continue
             os.environ[env_key] = str(val)
             LOADED_SECRET_ENV_KEYS.add(env_key)
     _clear_request_only_env()
@@ -474,6 +469,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     report_started = time.perf_counter()
     try:
         _log("INFO", "report_main_start", request_id=request_id, tenant=tenant_key)
+        import generate_report
+
         with contextlib.redirect_stderr(_Tee(log_buffer, sys.stderr)):
             code = generate_report.main(argv)
     except Exception as exc:
@@ -519,3 +516,113 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     }
     _log("INFO", "lambda_response", request_id=request_id, tenant=tenant_key, status=200 if code == 0 else 500)
     return _json_response(200 if code == 0 else 500, payload)
+
+
+def dispatch_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Validate a private API request and queue the report Lambda asynchronously."""
+    started = time.perf_counter()
+    request_id = getattr(context, "aws_request_id", None)
+    method = (event.get("httpMethod") or "GET").upper()
+    path = event.get("path") or "/"
+    headers = event.get("headers") or {}
+
+    _log(
+        "INFO",
+        "dispatch_invoked",
+        request_id=request_id,
+        method=method,
+        path=path,
+        header_names=_header_names(headers),
+        source=_request_source(event),
+        body_length=_body_len(event),
+        is_base64_encoded=bool(event.get("isBase64Encoded")),
+    )
+
+    if path != "/run":
+        _log("WARN", "dispatch_invalid_path", request_id=request_id, path=path)
+        return _json_response(404, {"ok": False, "error": "Use POST /run."})
+    if method != "POST":
+        _log("WARN", "dispatch_invalid_method", request_id=request_id, method=method)
+        return _json_response(405, {"ok": False, "error": "Use POST /run."})
+
+    try:
+        query = _query_params(event)
+        body = _decode_body(event)
+        tenant_key = _tenant_key(query, body)
+        secret_id = _tenant_secret_id(tenant_key)
+        _log(
+            "INFO",
+            "dispatch_request_decoded",
+            request_id=request_id,
+            tenant=tenant_key,
+            content_type=_header(headers, "content-type"),
+            args=_arg_summary(query, body),
+        )
+        _load_secret_env(secret_id)
+        if not _authorize(event):
+            _log("WARN", "dispatch_authorization_failed", request_id=request_id, tenant=tenant_key)
+            return _json_response(401, {"ok": False, "error": "Unauthorized."})
+        _argv(query, body, tenant_key)
+    except TenantConfigNotFound as exc:
+        _log("ERROR", "dispatch_tenant_not_found", request_id=request_id, error=str(exc))
+        return _json_response(400, {"ok": False, "error": str(exc)})
+    except ValueError as exc:
+        _log("ERROR", "dispatch_validation_failed", request_id=request_id, error=str(exc))
+        return _json_response(400, {"ok": False, "error": str(exc)})
+    except Exception as exc:
+        _log(
+            "ERROR",
+            "dispatch_preparation_failed",
+            request_id=request_id,
+            error=str(exc),
+            traceback=traceback.format_exc().splitlines(),
+        )
+        return _json_response(500, {"ok": False, "error": "Unable to prepare report request."})
+
+    worker_function = os.getenv("REPORT_WORKER_FUNCTION_NAME", "").strip()
+    if not worker_function:
+        _log("ERROR", "dispatch_worker_not_configured", request_id=request_id, tenant=tenant_key)
+        return _json_response(500, {"ok": False, "error": "Report worker is not configured."})
+
+    worker_event = dict(event)
+    worker_event["reportDispatchRequestId"] = request_id
+    try:
+        import boto3
+
+        response = boto3.client("lambda").invoke(
+            FunctionName=worker_function,
+            InvocationType="Event",
+            Payload=json.dumps(worker_event, separators=(",", ":"), default=str).encode("utf-8"),
+        )
+        if response.get("StatusCode") != 202:
+            raise RuntimeError(f"Unexpected Lambda async invoke status: {response.get('StatusCode')}")
+    except Exception as exc:
+        _log(
+            "ERROR",
+            "dispatch_enqueue_failed",
+            request_id=request_id,
+            tenant=tenant_key,
+            worker_function=worker_function,
+            error=str(exc),
+            traceback=traceback.format_exc().splitlines(),
+        )
+        return _json_response(500, {"ok": False, "error": "Unable to start report generation."})
+
+    _log(
+        "INFO",
+        "dispatch_accepted",
+        request_id=request_id,
+        tenant=tenant_key,
+        worker_function=worker_function,
+        elapsed_seconds=round(time.perf_counter() - started, 3),
+    )
+    return _json_response(
+        202,
+        {
+            "ok": True,
+            "status": "accepted",
+            "message": "Report generation started. The email will be sent when complete.",
+            "tenant": tenant_key,
+            "request_id": request_id,
+        },
+    )
