@@ -502,7 +502,8 @@ def d(day: dt.date) -> str:
 
 
 def strip_leading_zero(text: str) -> str:
-    return re.sub(r"\b0(\d)", r"\1", text)
+    """Strip a leading zero at the start of a date/time component, not after punctuation."""
+    return re.sub(r"(?<!\S)0(\d)", r"\1", text)
 
 
 def generated_string() -> str:
