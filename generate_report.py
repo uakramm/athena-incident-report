@@ -154,15 +154,43 @@ def _sev_display(value_to_label: Dict[str, str]) -> Tuple[List[str], Dict[str, L
 
 
 def incident_sev_maps() -> Tuple[Dict[str, str], Dict[str, List[str]]]:
-    """Alerts/incidents — mirrors Palace's JIRA_SEVERITY_*_VALUE. Sev-1 = confirmed compromise (Critical).
-    Default Athena/SECOPS mapping: Critical=Sev-2, High=Sev-3, Medium/Low=Sev-4."""
+    """Standard alerts/incidents: Jira Sev-1 through Sev-4 map naturally."""
     return _sev_maps([
-        ("Critical", _env("JIRA_SEVERITY_CONFIRMED_VALUE", "Sev-1")),
-        ("Critical", _env("JIRA_SEVERITY_CRITICAL_VALUE", "Sev-2")),
-        ("High", _env("JIRA_SEVERITY_HIGH_VALUE", "Sev-3")),
-        ("Medium", _env("JIRA_SEVERITY_MEDIUM_VALUE", "Sev-4")),
+        ("Critical", _env("JIRA_SEVERITY_CRITICAL_VALUE", "Sev-1")),
+        ("High", _env("JIRA_SEVERITY_HIGH_VALUE", "Sev-2")),
+        ("Medium", _env("JIRA_SEVERITY_MEDIUM_VALUE", "Sev-3")),
         ("Low", _env("JIRA_SEVERITY_LOW_VALUE", "Sev-4")),
     ])
+
+
+def nids_incident_sev_maps() -> Tuple[Dict[str, str], Dict[str, List[str]]]:
+    """SURICATA/NIDS alerts: confirmed and critical are separate Jira severities."""
+    return _sev_maps([
+        ("Critical", _env("JIRA_NIDS_SEVERITY_CONFIRMED_VALUE", "Sev-1")),
+        ("Critical", _env("JIRA_NIDS_SEVERITY_CRITICAL_VALUE", "Sev-2")),
+        ("High", _env("JIRA_NIDS_SEVERITY_HIGH_VALUE", "Sev-3")),
+        ("Medium", _env("JIRA_NIDS_SEVERITY_MEDIUM_VALUE", "Sev-4")),
+        ("Low", _env("JIRA_NIDS_SEVERITY_LOW_VALUE", "Sev-4")),
+    ])
+
+
+def is_nids_summary(summary: Any) -> bool:
+    """NIDS tickets carry a [SURICATA] marker in their Jira summary."""
+    return bool(re.search(r"\[\s*SURICATA\s*\]", str(summary or ""), re.IGNORECASE))
+
+
+def incident_severity_label(fields: Dict[str, Any], severity_field: str,
+                            standard_map: Optional[Dict[str, str]] = None,
+                            nids_map: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """Resolve an incident's report severity using its source-specific mapping."""
+    raw = fields.get(severity_field)
+    raw = raw.get("value") if isinstance(raw, dict) else raw
+    if standard_map is None:
+        standard_map, _ = incident_sev_maps()
+    if nids_map is None:
+        nids_map, _ = nids_incident_sev_maps()
+    mapping = nids_map if is_nids_summary(fields.get("summary")) else standard_map
+    return mapping.get(raw)
 
 
 def vulnerability_sev_maps() -> Tuple[Dict[str, str], Dict[str, List[str]]]:
@@ -614,17 +642,26 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     itime_field = cli.field_id(args.incident_time_field)
     log(f"Fields: severity={sev_field} mttr={mttr_field} mttd={mttd_field} incident_time={itime_field}")
 
-    inc_v2l, inc_all_label_values = incident_sev_maps()
-    inc_labels, inc_label_values = _sev_display(inc_v2l)
+    inc_v2l, inc_standard_label_values = incident_sev_maps()
+    inc_nids_v2l, inc_nids_label_values = nids_incident_sev_maps()
+    inc_all_label_values = {
+        label: list(dict.fromkeys(inc_standard_label_values.get(label, []) + inc_nids_label_values.get(label, [])))
+        for label in SEV_ORDER
+        if inc_standard_label_values.get(label) or inc_nids_label_values.get(label)
+    }
     inc_filter_labels = _configured_incident_labels(inc_all_label_values)
     inc_filter_values = [value for label in inc_filter_labels for value in inc_all_label_values.get(label, [])]
-    inc_labels = [label for label in inc_labels if any(value in inc_filter_values for value in inc_label_values[label])]
+    inc_filter_values = list(dict.fromkeys(inc_filter_values))
+    inc_labels = [label for label in SEV_ORDER if label in inc_filter_labels]
     vuln_v2l, vuln_all_label_values = vulnerability_sev_maps()
     vuln_labels, vuln_label_values = _sev_display(vuln_v2l)
     vuln_filter_labels = _configured_vuln_labels(vuln_all_label_values)
     vuln_filter_values = [value for label in vuln_filter_labels for value in vuln_all_label_values.get(label, [])]
     vuln_labels = [label for label in vuln_labels if any(value in vuln_filter_values for value in vuln_label_values[label])]
-    log(f"Incident severities: {inc_label_values} · Vulnerability severities: {vuln_label_values}")
+    log(
+        f"Incident severities: standard={inc_standard_label_values} "
+        f"nids={inc_nids_label_values} · Vulnerability severities: {vuln_label_values}"
+    )
     log(f"Incident filter: {', '.join(inc_filter_labels)} · Vulnerability filter: {', '.join(vuln_filter_labels)}")
 
     def sev_in(values: Sequence[str]) -> str:
@@ -635,6 +672,17 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
 
     def incidents_only(jql: str) -> str:
         return jql + " AND " + sev_in(inc_filter_values)
+
+    def incident_label(fields: Dict[str, Any]) -> Optional[str]:
+        return incident_severity_label(fields, sev_field, inc_v2l, inc_nids_v2l)
+
+    def incident_search(jql: str, fields: Sequence[str], limit: int = 2000) -> List[Dict[str, Any]]:
+        requested_fields = list(dict.fromkeys([*fields, "summary", sev_field]))
+        issues = cli.search(incidents_only(jql), requested_fields, limit=limit)
+        return [it for it in issues if incident_label(it.get("fields", {})) in inc_filter_labels]
+
+    def incident_count(jql: str) -> int:
+        return len(incident_search(jql, [], limit=5000))
 
     def opened(types: str, s: dt.date, e: dt.date) -> str:
         return scoped(types, f'created >= "{d(s)}"', f'created < "{d(e)}"')
@@ -647,12 +695,12 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
 
     # ---- exec counts ----
     log("Report build phase: executive incident counts.")
-    opened_n = cli.count(incidents_only(opened(INC_TYPES, start, end)))
-    closed_n = cli.count(incidents_only(closed(INC_TYPES, start, end)))
-    open_n = cli.count(incidents_only(open_at(INC_TYPES, end)))
-    p_opened, p_closed, p_open = (cli.count(incidents_only(opened(INC_TYPES, p_start, p_end))),
-                                  cli.count(incidents_only(closed(INC_TYPES, p_start, p_end))),
-                                  cli.count(incidents_only(open_at(INC_TYPES, p_start))))
+    opened_n = incident_count(opened(INC_TYPES, start, end))
+    closed_n = incident_count(closed(INC_TYPES, start, end))
+    open_n = incident_count(open_at(INC_TYPES, end))
+    p_opened, p_closed, p_open = (incident_count(opened(INC_TYPES, p_start, p_end)),
+                                  incident_count(closed(INC_TYPES, p_start, p_end)),
+                                  incident_count(open_at(INC_TYPES, p_start)))
     log(
         "Executive incident counts done: "
         f"opened={opened_n} closed={closed_n} open={open_n} "
@@ -661,14 +709,16 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
 
     # ---- severity of opened this week ----
     log("Report build phase: incident severity counts.")
-    inc_sev = [(label, cli.count(opened(INC_TYPES, start, end) + " AND " + sev_in(inc_label_values[label]))) for label in inc_labels]
+    opened_issues = incident_search(opened(INC_TYPES, start, end), [])
+    inc_sev = [(label, sum(1 for it in opened_issues if incident_label(it.get("fields", {})) == label))
+               for label in inc_labels]
     log(f"Incident severity counts done: {inc_sev}")
 
     # ---- MTTD / MTTR (Jira fields, fallback to timestamps) ----
     def avg_metric(jql: str, field_id: Optional[str], kind: str) -> Optional[float]:
         debug(f"Report build metric start: {kind} field={field_id} jql={jql}")
         want = [f for f in ["created", "resolutiondate", field_id, itime_field] if f]
-        issues = cli.search(jql, want, limit=2000)
+        issues = incident_search(jql, want, limit=2000)
         vals: List[float] = []
         for it in issues:
             f = it.get("fields", {})
@@ -688,10 +738,10 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         return avg
 
     log("Report build phase: MTTD/MTTR metrics.")
-    mttr = avg_metric(incidents_only(closed(INC_TYPES, start, end)), mttr_field, "mttr")
-    mttd = avg_metric(incidents_only(opened(INC_TYPES, start, end)), mttd_field, "mttd")
-    p_mttr = avg_metric(incidents_only(closed(INC_TYPES, p_start, p_end)), mttr_field, "mttr")
-    p_mttd = avg_metric(incidents_only(opened(INC_TYPES, p_start, p_end)), mttd_field, "mttd")
+    mttr = avg_metric(closed(INC_TYPES, start, end), mttr_field, "mttr")
+    mttd = avg_metric(opened(INC_TYPES, start, end), mttd_field, "mttd")
+    p_mttr = avg_metric(closed(INC_TYPES, p_start, p_end), mttr_field, "mttr")
+    p_mttd = avg_metric(opened(INC_TYPES, p_start, p_end), mttd_field, "mttd")
     log(f"MTTD/MTTR metrics done: mttr={fmt_duration(mttr)} mttd={fmt_duration(mttd)} prior_mttr={fmt_duration(p_mttr)} prior_mttd={fmt_duration(p_mttd)}")
 
     # ---- 6-week trend ----
@@ -702,9 +752,9 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         we = ws + dt.timedelta(days=7)
         trend.append({
             "label": "This wk" if i == 5 else f"W-{5 - i}",
-            "opened": cli.count(incidents_only(opened(INC_TYPES, ws, we))),
-            "closed": cli.count(incidents_only(closed(INC_TYPES, ws, we))),
-            "open": cli.count(incidents_only(open_at(INC_TYPES, we))),
+            "opened": incident_count(opened(INC_TYPES, ws, we)),
+            "closed": incident_count(closed(INC_TYPES, ws, we)),
+            "open": incident_count(open_at(INC_TYPES, we)),
         })
     log(f"6-week incident trend done: {trend}")
 
@@ -715,8 +765,9 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         ws = start - dt.timedelta(days=7 * (5 - i))
         we = ws + dt.timedelta(days=7)
         row: Dict[str, Any] = {"label": "This wk" if i == 5 else f"W-{5 - i}"}
+        week_issues = incident_search(opened(INC_TYPES, ws, we), [])
         for label in inc_labels:
-            row[label] = cli.count(opened(INC_TYPES, ws, we) + " AND " + sev_in(inc_label_values[label]))
+            row[label] = sum(1 for it in week_issues if incident_label(it.get("fields", {})) == label)
         sev_trend.append(row)
     log(f"Severity trend done: {sev_trend}")
 
@@ -726,9 +777,8 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     det_fields = ["summary", "issuetype", "status", "created", "components", "labels", sev_field]
     if src_field and src_field not in det_fields:
         det_fields.append(src_field)
-    open_issues = cli.search(
-        incidents_only(scoped(INC_TYPES, "statusCategory != Done", "resolution is EMPTY")) + f' ORDER BY "{args.severity_field}" ASC, created ASC',
-        det_fields, limit=args.max_open_rows)
+    open_issues = incident_search(
+        scoped(INC_TYPES, "statusCategory != Done", "resolution is EMPTY"), det_fields, limit=2000)
 
     def source_of(f: Dict[str, Any]) -> str:
         if args.source_field == "components":
@@ -743,11 +793,14 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         return val or "—"
 
     def sev_label(f: Dict[str, Any]) -> Tuple[str, str]:
-        raw = f.get(sev_field)
-        raw = raw.get("value") if isinstance(raw, dict) else raw
-        label = inc_v2l.get(raw) or (inc_labels[-1] if inc_labels else "Medium")
+        label = incident_label(f) or (inc_labels[-1] if inc_labels else "Medium")
         return label, render.SEV_CLASS[label]
 
+    open_issues.sort(key=lambda it: (
+        SEV_ORDER.index(incident_label(it.get("fields", {})) or "Low"),
+        parse_jira_dt(it.get("fields", {}).get("created")) or now,
+    ))
+    open_issues = open_issues[:args.max_open_rows]
     open_rows = []
     for it in open_issues:
         f = it.get("fields", {})
@@ -766,9 +819,12 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     # ---- closed selected ----
     log("Report build phase: closed incident detail.")
     closed_fields = ["summary", "issuetype", sev_field] + ([mttr_field] if mttr_field else []) + ["created", "resolutiondate", "components", "labels"]
-    closed_issues = cli.search(
-        incidents_only(closed(INC_TYPES, start, end)) + f' ORDER BY "{args.severity_field}" ASC, resolutiondate DESC',
-        closed_fields, limit=args.max_closed_rows)
+    closed_issues = incident_search(closed(INC_TYPES, start, end), closed_fields, limit=2000)
+    closed_issues.sort(key=lambda it: (
+        SEV_ORDER.index(incident_label(it.get("fields", {})) or "Low"),
+        -(parse_jira_dt(it.get("fields", {}).get("resolutiondate")) or dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)).timestamp(),
+    ))
+    closed_issues = closed_issues[:args.max_closed_rows]
     closed_rows = []
     for it in closed_issues:
         f = it.get("fields", {})
@@ -791,7 +847,7 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     type_breakdown: List[Tuple[str, int]] = []
     if type_field:
         tally: Dict[str, int] = {}
-        for it in cli.search(incidents_only(opened(INC_TYPES, start, end)), [type_field], limit=2000):
+        for it in incident_search(opened(INC_TYPES, start, end), [type_field], limit=2000):
             val = it.get("fields", {}).get(type_field)
             names: List[str] = []
             if isinstance(val, list):  # multi-select
@@ -814,9 +870,9 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     log("Report build phase: incident SLA.")
     sla_secs = sla_targets()
     sla_buckets: Dict[str, List[int]] = {label: [0, 0] for label in inc_labels}  # label -> [met, total]
-    for it in cli.search(incidents_only(closed(INC_TYPES, start, end)),
-                         [sev_field, mttr_field, "created", "resolutiondate"] if mttr_field else [sev_field, "created", "resolutiondate"],
-                         limit=2000):
+    for it in incident_search(closed(INC_TYPES, start, end),
+                              [sev_field, mttr_field, "created", "resolutiondate"] if mttr_field else [sev_field, "created", "resolutiondate"],
+                              limit=2000):
         f = it.get("fields", {})
         lbl, _ = sev_label(f)
         if lbl not in sla_buckets:
