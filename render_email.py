@@ -369,13 +369,15 @@ def _exec(d: Dict[str, Any], n: int = 1) -> str:
         _tile("blue", "Incidents opened", f'{e["opened"]:,}', e["opened_delta"]),
         _tile("green", "Incidents closed", f'{e["closed"]:,}', e["closed_delta"]),
         _tile("red", "Open at week end", f'{e["open"]:,}', e["open_delta"]),
-        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True),
-        _tile("", "Mean time to resolve", e["mttr"], e["mttr_delta"], small=True),
         _tile("green", "System availability", e["uptime"], e["uptime_note"], small=True),
+        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True),
+        _tile("", "Mean time to ticket", e["mttt"], e["mttt_delta"], small=True),
+        _tile("", "Mean time to respond", e["mttr"], e["mttr_delta"], small=True),
+        _tile("", "Mean time to close", e["mttc"], e["mttc_delta"], small=True),
     ]
     return (
         _sec_head(f"{n:02d} · This week at a glance", "Executive summary", "")
-        + _tile_grid(tiles, 6)
+        + _tile_grid(tiles, 4)
         + f'<div style="{FONT}font-size:12px;color:{MUTED};padding:10px 2px 0;">Running totals across the full '
           "reporting week, not a snapshot. &#9650;/&#9660; compare to the prior week; green marks the favorable direction.</div>"
     )
@@ -407,7 +409,7 @@ def _legend(items: Sequence[Tuple[str, str]]) -> str:
 
 def _incident_table(rows: Sequence[Dict[str, Any]], closed: bool, more: int = 0) -> str:
     if closed:
-        heads = ["Ref", "Type", "Severity", "Summary", "Source", "Time to resolve"]
+        heads = ["Ref", "Type", "Severity", "Summary", "Source", "Time to close"]
         aligns = ["left", "left", "left", "left", "left", "right"]
     else:
         heads = ["Ref", "Type", "Severity", "Summary", "Source", "Opened", "Age", "Status"]
@@ -429,7 +431,7 @@ def _incident_table(rows: Sequence[Dict[str, Any]], closed: bool, more: int = 0)
             esc(r["source"]),
         ]
         if closed:
-            cells.append(esc(r["ttr"]))
+            cells.append(esc(r["ttc"]))
         else:
             cells += [esc(r["opened"]), esc(r["age"]), esc(r["status"])]
         tds = "".join(
@@ -699,8 +701,10 @@ def _availability(d: Dict[str, Any], n: int = 6) -> str:
 def _footer(d: Dict[str, Any]) -> str:
     email = d.get("support_email", "")
     defs = [
-        "<b>MTTD</b> — Mean time to detect: event occurrence (Incident Time) to the work item being raised.",
-        "<b>MTTR</b> — Mean time to resolve: work item raised to Resolved / Closed.",
+        "<b>MTTD</b> — Mean time to detect: event occurrence to alert generation in Athena Core.",
+        "<b>MTTT</b> — Mean time to ticket: Athena Core alert generation to Jira ticket creation.",
+        "<b>MTTR</b> — Mean time to respond: Jira ticket creation to the analyst's first response or action.",
+        "<b>MTTC</b> — Mean time to close: endpoint event occurrence to Resolved / Closed.",
         "<b>Severity</b> — from the Jira Sev-1…Sev-4 field, mapped per the platform's severity classification.",
         "<b>Reporting period</b> — one week.",
     ]
@@ -709,8 +713,11 @@ def _footer(d: Dict[str, Any]) -> str:
         f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 18px 6px 2px;">{defs[0]}</td>'
         f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 2px 6px 18px;">{defs[1]}</td>'
         '</tr><tr>'
-        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 18px 0 2px;">{defs[2]}</td>'
-        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 2px 0 18px;">{defs[3]}</td>'
+        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 18px 6px 2px;">{defs[2]}</td>'
+        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 2px 6px 18px;">{defs[3]}</td>'
+        '</tr><tr>'
+        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 18px 0 2px;">{defs[4]}</td>'
+        f'<td width="50%" valign="top" style="{FONT}font-size:11.5px;color:{MUTED};line-height:1.7;padding:0 2px 0 18px;">{defs[5]}</td>'
         '</tr>'
     )
     return (

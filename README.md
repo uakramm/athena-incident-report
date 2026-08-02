@@ -1,6 +1,8 @@
 # Weekly Security Operations Report
 
-This tool builds the weekly security report from Jira and emails it to the client.
+This tool builds the weekly security report from the tenant's OpenSearch
+`pallas-incidents` index and emails it to the client. Jira remains authoritative;
+the Pallas sync service mirrors its latest ticket state into this index.
 
 ## First-time setup (only once)
 
@@ -44,7 +46,7 @@ Then send the report (same command on both):
 python generate_report.py --env-file .env.athena --send-email
 ```
 
-That's it — this pulls the latest data from Jira and emails the report out.
+That's it — this pulls the latest synced data from OpenSearch and emails the report out.
 
 > On Windows, if `python` isn't recognized, try `py` instead
 > (e.g. `py -m venv .venv` and `py generate_report.py --env-file .env.athena --send-email`).
@@ -77,15 +79,26 @@ dispatcher:
 
 ```
 OpenVPN / Client VPN -> execute-api VPC endpoint -> Private REST API
-                    -> dispatcher Lambda -> report Lambda -> Jira + Microsoft Graph
+                    -> dispatcher Lambda -> tenant VPC Lambda
+                    -> OpenSearch + Microsoft Graph
 ```
 
-The private API is restricted to its `execute-api` interface VPC endpoint. The
-endpoint security group allows HTTPS only from `172.16.0.0/16`. There is no
-public API endpoint, load balancer, scheduler, or recurring health-check Lambda
-invocation. The default deployment uses one endpoint subnet in `us-east-2a` to
-keep the fixed PrivateLink cost to one endpoint ENI; add a second subnet only if
-the manual trigger needs multi-AZ endpoint availability.
+The private API is restricted to its `execute-api` interface VPC endpoint. There
+is no public API endpoint, load balancer, scheduler, or recurring health-check
+Lambda invocation. Production uses separate Athena and NBS workers in their
+existing tenant subnets so each worker can reach its tenant's private indexer
+without changing the existing indexer endpoint security groups.
+
+The executive summary reports four separate incident lifecycle intervals:
+
+- `MTTD`: event occurrence to Athena Core alert generation.
+- `MTTT`: Athena Core alert generation to Jira ticket creation.
+- `MTTR`: Jira ticket creation to the analyst's first response or action.
+- `MTTC`: endpoint event occurrence to Resolved/Closed.
+
+The report reads `mttd_minutes`, `mttt_minutes`, `mttr_minutes`, and
+`mttc_minutes` from `pallas-incidents`. Timestamp fallbacks use the mirrored
+event, alert, ticket creation, first-response, and resolution timestamps.
 
 API Gateway returns `202 Accepted` after validating the request and queuing the
 report. The report Lambda then runs in the background, avoiding API Gateway's
@@ -130,14 +143,15 @@ athena-incident-report/nbs/config
 
 The secret can be a JSON object or dotenv-style text using the same keys as the
 local `.env` file. `REPORT_EMAIL_TO` and `REPORT_EMAIL_CC` are ignored from the
-secret and must be passed on every API call. If the secret contains
+secret and must be passed on every API call. `REPORT_EMAIL_FROM` is managed by
+the report Lambda environment and is also ignored from tenant secrets. If the secret contains
 `REPORT_TRIGGER_TOKEN`, callers must pass it as `X-Report-Token` or
 `Authorization: Bearer ...`; if it is absent, the endpoint relies only on the
 VPN/private API network boundary.
 
-Set `REPORT_LOG_LEVEL=DEBUG` in a tenant secret only when you need the detailed
-Jira API trace in CloudWatch. The default `INFO` level keeps the high-level
-report progress logs and hides per-request Jira HTTP/search/count/JQL details.
+Set `REPORT_LOG_LEVEL=DEBUG` in a tenant secret only when you need detailed
+OpenSearch request and compatibility-query traces in CloudWatch. The default
+`INFO` level keeps only high-level report progress logs.
 
 To create or update a tenant config secret from a local env file:
 
@@ -154,6 +168,7 @@ Deployment files:
 - `lambda_handler.py` - private API dispatcher and report worker handlers.
 - `infra/private-api-lambda.yaml` - Private REST API, VPC endpoint, and Lambda resources.
 - `infra/deploy-private-api-lambda.sh` - guarded zip/layer packaging and ALB migration.
+- `infra/deploy-prod-private-api-lambda.sh` - guarded production deployment using `athena-prod`.
 - `infra/sync-tenant-secret.sh` - guarded tenant secret create/update helper.
 - `run-report.sh` - simple manual report command.
 
@@ -165,4 +180,12 @@ CloudFormation stack by default. It prints the exact change and requires typing
 
 ```bash
 AWS_PROFILE=athena AWS_REGION=us-east-2 infra/deploy-private-api-lambda.sh
+```
+
+Production deployment uses account `556976944260`, profile `athena-prod`, and
+region `us-east-2`. It requires typing `DEPLOY` before creating or updating AWS
+resources:
+
+```bash
+AWS_PROFILE=athena-prod AWS_REGION=us-east-2 infra/deploy-prod-private-api-lambda.sh
 ```

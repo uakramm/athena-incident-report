@@ -262,13 +262,15 @@ def _exec(d: Dict[str, Any], n: int = 1) -> str:
         _tile("blue", "Incidents opened", f'{e["opened"]:,}', e["opened_delta"]),
         _tile("green", "Incidents closed", f'{e["closed"]:,}', e["closed_delta"]),
         _tile("red", "Open at week end", f'{e["open"]:,}', e["open_delta"]),
-        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True),
-        _tile("", "Mean time to resolve", e["mttr"], e["mttr_delta"], small=True),
         _tile("green", "System availability", e["uptime"], e["uptime_note"], small=True),
+        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True),
+        _tile("", "Mean time to ticket", e["mttt"], e["mttt_delta"], small=True),
+        _tile("", "Mean time to respond", e["mttr"], e["mttr_delta"], small=True),
+        _tile("", "Mean time to close", e["mttc"], e["mttc_delta"], small=True),
     ]
     return (
         "<section>" + _sec_head(f"{n:02d} · This week at a glance", "Executive summary", "") +
-        '<div class="tiles t6">' + "".join(tiles) + "</div>"
+        '<div class="tiles t4">' + "".join(tiles) + "</div>"
         '<p class="caption">Running totals across the full reporting week, not a snapshot. '
         "▲/▼ compare to the prior week; green marks the favorable direction.</p></section>"
     )
@@ -317,7 +319,7 @@ def _inc_closed_rows(rows: Sequence[Dict[str, Any]], more: int) -> str:
             f'<td>{_pill(r["sev_class"], r["sev"])}</td>'
             f'<td class="sum">{esc(r["summary"])}</td>'
             f"<td>{esc(r['source'])}</td>"
-            f'<td class="r num-cell">{esc(r["ttr"])}</td>'
+            f'<td class="r num-cell">{esc(r["ttc"])}</td>'
             "</tr>"
         )
     if more > 0:
@@ -386,7 +388,7 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
         f"</tr></thead><tbody>{open_rows}</tbody></table></div>"
         f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Closed this week ({d["closed_count"]:,}) — selected</h3>'
         '<div class="tbl-wrap"><table><thead><tr>'
-        '<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th class="r">Time to resolve</th>'
+        '<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th class="r">Time to close</th>'
         f"</tr></thead><tbody>{closed_rows}</tbody></table></div></section>"
     )
 
@@ -521,8 +523,10 @@ def _footer(d: Dict[str, Any]) -> str:
     email = d.get("support_email", "")
     return (
         '<div class="foot"><div class="defs">'
-        "<div><b>MTTD</b> — Mean time to detect: event occurrence (Incident Time) to the work item being raised.</div>"
-        "<div><b>MTTR</b> — Mean time to resolve: work item raised to Resolved / Closed.</div>"
+        "<div><b>MTTD</b> — Mean time to detect: event occurrence to alert generation in Athena Core.</div>"
+        "<div><b>MTTT</b> — Mean time to ticket: Athena Core alert generation to Jira ticket creation.</div>"
+        "<div><b>MTTR</b> — Mean time to respond: Jira ticket creation to the analyst's first response or action.</div>"
+        "<div><b>MTTC</b> — Mean time to close: endpoint event occurrence to Resolved / Closed.</div>"
         "<div><b>Severity</b> — from the Jira Sev-1…Sev-4 field, mapped per the platform's severity classification.</div>"
         "<div><b>Reporting period</b> — one week.</div>"
         '</div><div class="footbar"><div class="org">Athena Security Group</div>'

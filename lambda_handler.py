@@ -20,6 +20,7 @@ PROTECTED_SECRET_ENV_KEYS = {
     "REPORT_ALLOW_GET",
     "REPORT_LAMBDA_SEND_EMAIL",
     "REPORT_WORKER_FUNCTION_NAME",
+    "REPORT_WORKER_FUNCTIONS",
 }
 TENANT_SECRET_TEMPLATE = "athena-incident-report/{tenant}/config"
 TENANT_KEY_RE = re.compile(r"^[a-z0-9_.-]+$")
@@ -263,6 +264,19 @@ def _tenant_key(query: Mapping[str, Any], body: Mapping[str, Any]) -> str:
 
 def _tenant_secret_id(tenant: str) -> str:
     return TENANT_SECRET_TEMPLATE.format(tenant=tenant)
+
+
+def _worker_function(tenant: str) -> str:
+    raw_mapping = os.getenv("REPORT_WORKER_FUNCTIONS", "").strip()
+    if raw_mapping:
+        try:
+            mapping = json.loads(raw_mapping)
+        except json.JSONDecodeError as exc:
+            raise ValueError("REPORT_WORKER_FUNCTIONS must be a JSON object.") from exc
+        if not isinstance(mapping, dict):
+            raise ValueError("REPORT_WORKER_FUNCTIONS must be a JSON object.")
+        return str(mapping.get(tenant) or "").strip()
+    return os.getenv("REPORT_WORKER_FUNCTION_NAME", "").strip()
 
 
 def _load_secret_env(secret_id: str) -> List[str]:
@@ -579,7 +593,11 @@ def dispatch_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
         return _json_response(500, {"ok": False, "error": "Unable to prepare report request."})
 
-    worker_function = os.getenv("REPORT_WORKER_FUNCTION_NAME", "").strip()
+    try:
+        worker_function = _worker_function(tenant_key)
+    except ValueError as exc:
+        _log("ERROR", "dispatch_worker_config_invalid", request_id=request_id, error=str(exc))
+        return _json_response(500, {"ok": False, "error": "Report worker configuration is invalid."})
     if not worker_function:
         _log("ERROR", "dispatch_worker_not_configured", request_id=request_id, tenant=tenant_key)
         return _json_response(500, {"ok": False, "error": "Report worker is not configured."})

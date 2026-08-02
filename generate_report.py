@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate a weekly, client-facing Security Operations Report from Jira on demand.
+"""Generate a weekly, client-facing Security Operations Report from OpenSearch on demand.
 
-Pulls incident (Security Alert + Security Incident) and Vulnerability data from a
-client's SECOPS Jira project, reads the manually-added MTTD / MTTR custom fields,
-and renders a self-contained HTML report (print to PDF for the client copy).
-Device / endpoint / availability data is not in Jira — pass it via ``--supplemental``.
+Pulls Jira-linked incident and vulnerability data from the tenant's
+``pallas-incidents`` index, reads the mirrored lifecycle fields, and renders a
+self-contained HTML report (print to PDF for the client copy). Device / endpoint /
+availability data is not in the incident index - pass it via ``--supplemental``.
 
     python generate_report.py --project-key NSO --client Neuro \
         --environment Production --tenant neuro.athenasecuritygrp.com \
@@ -241,6 +241,10 @@ class JiraError(RuntimeError):
     pass
 
 
+class OpenSearchError(RuntimeError):
+    pass
+
+
 # Atlassian OAuth 2.0 endpoints.
 ATLASSIAN_AUTH_URL = "https://auth.atlassian.com/oauth/token"
 ATLASSIAN_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources"
@@ -379,6 +383,325 @@ class JiraClient:
         return result
 
 
+class OpenSearchClient:
+    """Expose pallas-incidents through the small Jira-like interface used below.
+
+    Keeping the compatibility boundary here lets the established report metrics
+    and rendering code operate on Jira's authoritative state mirrored into
+    OpenSearch without making any Jira API calls.
+    """
+
+    FIELD_IDS = {
+        "severity": "severity",
+        "mttd (minutes)": "mttd_minutes",
+        "mttt (minutes)": "mttt_minutes",
+        "mttr (minutes)": "mttr_minutes",
+        "mttc (minutes)": "mttc_minutes",
+        "incident time (eastern time - et)": "event_timestamp",
+        "alert generated time": "alert_generated_at",
+        "first response time": "first_response_at",
+        "type of incident": "incident_type",
+        "vulnerability id(s)": "vulnerability_ids",
+        "source": "source",
+    }
+
+    def __init__(self, base_url: str, username: str, password: str, *,
+                 index: str = "pallas-incidents", verify_ssl: bool = False,
+                 browse_base: str = "", project_name: str = "",
+                 documents: Optional[Sequence[Dict[str, Any]]] = None):
+        if not base_url:
+            raise OpenSearchError("OPENSEARCH_URL is required.")
+        if not username:
+            raise OpenSearchError("OPENSEARCH_USERNAME is required.")
+        if not password:
+            raise OpenSearchError("OPENSEARCH_PASSWORD is required.")
+        if requests is None and documents is None:
+            raise OpenSearchError(
+                "The 'requests' package is required for OpenSearch. "
+                "Run: pip install -r requirements.txt"
+            )
+        self.base = base_url.rstrip("/")
+        self.index = index or "pallas-incidents"
+        self.verify_ssl = verify_ssl
+        self.browse_base = browse_base.rstrip("/")
+        self._project_name = project_name
+        self.session = requests.Session() if requests is not None else None
+        if self.session is not None:
+            self.session.auth = (username, password)
+            self.session.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+        self._issues: Optional[List[Dict[str, Any]]] = (
+            [self._to_issue(doc) for doc in documents] if documents is not None else None
+        )
+
+    @classmethod
+    def from_env(cls) -> "OpenSearchClient":
+        return cls(
+            _env("OPENSEARCH_URL", ""),
+            _env("OPENSEARCH_USERNAME", ""),
+            os.getenv("OPENSEARCH_PASSWORD") or "",
+            index=_env("OPENSEARCH_INDEX", "pallas-incidents") or "pallas-incidents",
+            verify_ssl=_env_bool("OPENSEARCH_VERIFY_SSL", False),
+            browse_base=jira_site_url(),
+            project_name=_env("REPORT_PROJECT_NAME", ""),
+        )
+
+    def _req(self, method: str, path: str, **kwargs: Any) -> Any:
+        if self.session is None:
+            raise OpenSearchError("The 'requests' package is required for OpenSearch.")
+        started = time.perf_counter()
+        debug(f"OpenSearch HTTP start: {method} {path}")
+        try:
+            response = self.session.request(
+                method, self.base + path, timeout=90, verify=self.verify_ssl, **kwargs
+            )
+        except requests.RequestException as exc:
+            raise OpenSearchError(f"OpenSearch request failed for {self.base}: {exc}") from exc
+        debug(
+            f"OpenSearch HTTP done: {method} {path} -> HTTP {response.status_code} "
+            f"in {time.perf_counter() - started:.2f}s"
+        )
+        if response.status_code not in (200, 201):
+            raise OpenSearchError(
+                f"{method} {path} -> HTTP {response.status_code}\n{response.text[:800]}"
+            )
+        return response.json() if response.content else None
+
+    def _load_issues(self) -> List[Dict[str, Any]]:
+        if self._issues is not None:
+            return self._issues
+        log(f"OpenSearch load start: endpoint={self.base} index={self.index}")
+        issues: List[Dict[str, Any]] = []
+        search_after: Optional[List[Any]] = None
+        page = 0
+        while True:
+            page += 1
+            body: Dict[str, Any] = {
+                "size": 500,
+                "query": {"exists": {"field": "jira_ticket_id"}},
+                "sort": [
+                    {"jira_ticket_id": {"order": "asc", "unmapped_type": "keyword"}},
+                    {"incident_id": {"order": "asc", "unmapped_type": "keyword"}},
+                ],
+            }
+            if search_after:
+                body["search_after"] = search_after
+            data = self._req("POST", f"/{urllib.parse.quote(self.index, safe='-_,*')}/_search", json=body)
+            hits = ((data or {}).get("hits") or {}).get("hits") or []
+            for hit in hits:
+                source = dict(hit.get("_source") or {})
+                source.setdefault("_doc_id", hit.get("_id"))
+                issues.append(self._to_issue(source))
+            debug(f"OpenSearch page {page}: fetched={len(hits)} accumulated={len(issues)}")
+            if len(hits) < body["size"]:
+                break
+            next_sort = hits[-1].get("sort")
+            if not next_sort or next_sort == search_after:
+                raise OpenSearchError("OpenSearch pagination did not advance.")
+            search_after = next_sort
+        self._issues = issues
+        log(f"OpenSearch load done: Jira-linked documents={len(issues)}")
+        return issues
+
+    @staticmethod
+    def _is_vulnerability(doc: Dict[str, Any]) -> bool:
+        groups = " ".join(str(item) for item in (doc.get("rule_groups") or []))
+        alert_data = doc.get("alert_data") if isinstance(doc.get("alert_data"), dict) else {}
+        text = " ".join([
+            groups,
+            str(doc.get("rule_description") or ""),
+            json.dumps(alert_data, default=str),
+        ]).lower()
+        return "vulnerability" in text or bool(CVE_RE.search(text))
+
+    @staticmethod
+    def _is_nids(doc: Dict[str, Any]) -> bool:
+        groups = " ".join(str(item) for item in (doc.get("rule_groups") or []))
+        source = f"{doc.get('alert_source', '')} {groups}".lower()
+        return "suricata" in source or "nids" in source
+
+    @staticmethod
+    def _severity_value(doc: Dict[str, Any], vulnerability: bool, nids: bool) -> str:
+        label = str(doc.get("severity") or "").strip().lower()
+        standard = {
+            "critical": _env("JIRA_SEVERITY_CRITICAL_VALUE", "Sev-1"),
+            "high": _env("JIRA_SEVERITY_HIGH_VALUE", "Sev-2"),
+            "medium": _env("JIRA_SEVERITY_MEDIUM_VALUE", "Sev-3"),
+            "low": _env("JIRA_SEVERITY_LOW_VALUE", "Sev-4"),
+        }
+        vuln = {
+            "critical": _env("JIRA_VULN_SEVERITY_CRITICAL_VALUE", "Sev-1"),
+            "high": _env("JIRA_VULN_SEVERITY_HIGH_VALUE", "Sev-2"),
+            "medium": _env("JIRA_VULN_SEVERITY_MEDIUM_VALUE", "Sev-3"),
+            "low": _env("JIRA_VULN_SEVERITY_LOW_VALUE", "Sev-4"),
+        }
+        nids_values = {
+            "confirmed": _env("JIRA_NIDS_SEVERITY_CONFIRMED_VALUE", "Sev-1"),
+            "critical": _env("JIRA_NIDS_SEVERITY_CRITICAL_VALUE", "Sev-2"),
+            "high": _env("JIRA_NIDS_SEVERITY_HIGH_VALUE", "Sev-3"),
+            "medium": _env("JIRA_NIDS_SEVERITY_MEDIUM_VALUE", "Sev-4"),
+            "low": _env("JIRA_NIDS_SEVERITY_LOW_VALUE", "Sev-4"),
+        }
+        mapping = vuln if vulnerability else (nids_values if nids else standard)
+        return mapping.get(label, standard.get(label, "Sev-4"))
+
+    @staticmethod
+    def _source(doc: Dict[str, Any]) -> str:
+        alert_data = doc.get("alert_data") if isinstance(doc.get("alert_data"), dict) else {}
+        raw = (
+            alert_data.get("vendor_source")
+            or alert_data.get("source")
+            or doc.get("alert_source")
+            or "Unknown"
+        )
+        return str(raw).replace("_", " ").strip().title()
+
+    @classmethod
+    def _to_issue(cls, doc: Dict[str, Any]) -> Dict[str, Any]:
+        alert_data = doc.get("alert_data") if isinstance(doc.get("alert_data"), dict) else {}
+        vulnerability = cls._is_vulnerability(doc)
+        nids = cls._is_nids(doc)
+        source = cls._source(doc)
+        raw_severity = str(doc.get("severity") or "").strip().upper() or "LOW"
+        summary = (
+            alert_data.get("summary")
+            or alert_data.get("rule_description")
+            or alert_data.get("description")
+            or doc.get("rule_description")
+            or doc.get("alert_id")
+            or "Security alert"
+        )
+        summary = str(summary)
+        if nids and not is_nids_summary(summary):
+            summary = f"[{raw_severity}] [SURICATA] {summary}"
+        elif not re.match(r"^\s*\[", summary):
+            summary = f"[{raw_severity}] [{source}] {summary}"
+
+        resolved_at = doc.get("jira_resolved_at") or doc.get("closed_at")
+        status_name = str(doc.get("jira_status") or doc.get("status") or "Open")
+        status_category = str(doc.get("jira_status_category") or "")
+        done = status_category.lower() == "done" or status_name.lower() in {
+            "done", "closed", "resolved", "complete", "completed"
+        }
+        if resolved_at:
+            done = True
+
+        full_text = " ".join([
+            str(doc.get("rule_description") or ""),
+            json.dumps(alert_data, default=str),
+            str(doc.get("resolution_notes") or ""),
+        ])
+        cves = sorted(_find_cves(full_text))
+        incident_type = (
+            alert_data.get("incident_type")
+            or alert_data.get("category")
+            or alert_data.get("rule_group")
+            or ("Vulnerability" if vulnerability else source)
+        )
+        key = str(doc.get("jira_ticket_id") or "").strip()
+        return {
+            "key": key,
+            "_opensearch": doc,
+            "fields": {
+                "summary": summary,
+                "issuetype": {"name": "Vulnerability" if vulnerability else "Security Alert"},
+                "severity": {"value": cls._severity_value(doc, vulnerability, nids)},
+                "created": doc.get("jira_created_at") or doc.get("created_at"),
+                "resolutiondate": resolved_at,
+                "status": {"name": status_name, "statusCategory": {"name": "Done" if done else "In Progress"}},
+                "components": [{"name": source}],
+                "labels": [str(item) for item in (doc.get("rule_groups") or [])],
+                "source": source,
+                "mttd_minutes": doc.get("mttd_minutes"),
+                "mttt_minutes": doc.get("mttt_minutes"),
+                "mttr_minutes": doc.get("mttr_minutes"),
+                "mttc_minutes": doc.get("mttc_minutes"),
+                "event_timestamp": doc.get("event_timestamp"),
+                "alert_generated_at": doc.get("alert_generated_at") or doc.get("alert_timestamp"),
+                "first_response_at": doc.get("first_response_at"),
+                "incident_type": incident_type,
+                "vulnerability_ids": ", ".join(cves),
+                "description": full_text,
+                "comment": {"comments": []},
+            },
+        }
+
+    def field_id(self, name: str) -> Optional[str]:
+        if name in {
+            "created", "resolutiondate", "status", "summary", "issuetype",
+            "components", "labels", "description", "comment",
+        }:
+            return name
+        return self.FIELD_IDS.get(name.strip().lower(), name if name in self.FIELD_IDS.values() else None)
+
+    def project_name(self, _key: str) -> Optional[str]:
+        return self._project_name or None
+
+    @staticmethod
+    def _date(value: Any) -> Optional[dt.datetime]:
+        parsed = parse_jira_dt(str(value)) if value else None
+        if parsed and parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed
+
+    @classmethod
+    def _matches(cls, issue: Dict[str, Any], jql: str) -> bool:
+        fields = issue.get("fields", {})
+        lower = jql.lower()
+        issue_type = (fields.get("issuetype") or {}).get("name", "")
+        if "issuetype = vulnerability" in lower and issue_type != "Vulnerability":
+            return False
+        if "issuetype in" in lower and "security alert" in lower and issue_type == "Vulnerability":
+            return False
+
+        severity_match = re.search(r'"[^"\n]*severity[^"\n]*"\s+in\s*\(([^)]*)\)', jql, re.IGNORECASE)
+        if severity_match:
+            allowed = {item.strip().strip('"\'') for item in severity_match.group(1).split(",")}
+            severity = fields.get("severity") or {}
+            severity = severity.get("value") if isinstance(severity, dict) else severity
+            if severity not in allowed:
+                return False
+
+        created = cls._date(fields.get("created"))
+        resolved = cls._date(fields.get("resolutiondate"))
+        for op, raw in re.findall(r'\bcreated\s*(>=|<)\s*"(\d{4}-\d{2}-\d{2})"', jql, re.IGNORECASE):
+            boundary = dt.datetime.combine(dt.date.fromisoformat(raw), dt.time.min, tzinfo=dt.timezone.utc)
+            if created is None or (op == ">=" and created < boundary) or (op == "<" and created >= boundary):
+                return False
+
+        open_at = re.search(
+            r'\(\s*resolutiondate\s+is\s+empty\s+or\s+resolutiondate\s*>=\s*"(\d{4}-\d{2}-\d{2})"\s*\)',
+            jql, re.IGNORECASE,
+        )
+        if open_at:
+            boundary = dt.datetime.combine(
+                dt.date.fromisoformat(open_at.group(1)), dt.time.min, tzinfo=dt.timezone.utc
+            )
+            if resolved is not None and resolved < boundary:
+                return False
+        else:
+            for op, raw in re.findall(r'\bresolutiondate\s*(>=|<)\s*"(\d{4}-\d{2}-\d{2})"', jql, re.IGNORECASE):
+                boundary = dt.datetime.combine(dt.date.fromisoformat(raw), dt.time.min, tzinfo=dt.timezone.utc)
+                if resolved is None or (op == ">=" and resolved < boundary) or (op == "<" and resolved >= boundary):
+                    return False
+
+        if "resolution is empty" in lower and resolved is not None:
+            return False
+        if "statuscategory != done" in lower:
+            category = ((fields.get("status") or {}).get("statusCategory") or {}).get("name", "")
+            if category.lower() == "done":
+                return False
+        return True
+
+    def search(self, jql: str, fields: Sequence[str], limit: int = 1000) -> List[Dict[str, Any]]:
+        del fields
+        matches = [issue for issue in self._load_issues() if self._matches(issue, jql)]
+        debug(f"OpenSearch compatibility query: matched={len(matches)} limit={limit} jql={jql}")
+        return matches[:limit]
+
+    def count(self, jql: str) -> int:
+        return len(self.search(jql, [], limit=1000000))
+
+
 def jira_site_url() -> str:
     """Jira site URL, from JIRA_SITE_URL (or JIRA_BASE_URL, as athena-pallas names it)."""
     return _env("JIRA_SITE_URL", "") or _env("JIRA_BASE_URL", "")
@@ -442,7 +765,7 @@ def parse_jira_dt(value: Optional[str]) -> Optional[dt.datetime]:
 
 
 def coerce_seconds(value: Any, unit: str) -> Optional[float]:
-    """Interpret an MTTR/MTTD field value as seconds."""
+    """Interpret a lifecycle duration field value as seconds."""
     if value is None or value == "":
         return None
     if isinstance(value, dict):
@@ -464,6 +787,18 @@ def coerce_seconds(value: Any, unit: str) -> Optional[float]:
         return float(s) * {"seconds": 1, "minutes": 60, "hours": 3600}.get(unit, 60)
     except ValueError:
         return None
+
+
+def lifecycle_seconds(fields: Dict[str, Any], duration_field: Optional[str],
+                      start_field: Optional[str], end_field: Optional[str],
+                      duration_unit: str = "minutes") -> Optional[float]:
+    """Read a lifecycle duration, falling back to a semantically matching timestamp interval."""
+    sec = coerce_seconds(fields.get(duration_field), duration_unit) if duration_field else None
+    if sec is None and start_field and end_field:
+        start_at = parse_jira_dt(fields.get(start_field))
+        end_at = parse_jira_dt(fields.get(end_field))
+        sec = (end_at - start_at).total_seconds() if start_at and end_at else None
+    return sec if sec is not None and sec >= 0 else None
 
 
 def fmt_duration(seconds: Optional[float]) -> str:
@@ -562,7 +897,7 @@ def period_label(start: dt.date, end: dt.date) -> str:
 # --------------------------------------------------------------------------- #
 
 def auto_commentary(*, opened_n: int, closed_n: int, open_n: int, prev_open: Optional[int],
-                    mttr_secs: Optional[float], inc_sla: Optional[Dict[str, Any]],
+                    mttc_secs: Optional[float], inc_sla: Optional[Dict[str, Any]],
                     type_breakdown: Sequence[Tuple[str, int]], open_rows: Sequence[Dict[str, Any]],
                     include_vuln: bool, v_resolved: int, v_new: int,
                     vuln_sla: Optional[Dict[str, Any]]) -> str:
@@ -590,8 +925,8 @@ def auto_commentary(*, opened_n: int, closed_n: int, open_n: int, prev_open: Opt
     else:
         p1.append(", clearing the incident queue entirely")
     p1.append(".")
-    if mttr_secs:
-        p1.append(f" Mean time to resolve held at {fmt_duration(mttr_secs)}.")
+    if mttc_secs:
+        p1.append(f" Mean time to close held at {fmt_duration(mttc_secs)}.")
     if inc_sla and inc_sla.get("overall") is not None:
         p1.append(f" Overall <b>{inc_sla['overall']}%</b> of resolved incidents met their severity SLA")
         w = worst(inc_sla)
@@ -622,7 +957,7 @@ def auto_commentary(*, opened_n: int, closed_n: int, open_n: int, prev_open: Opt
     return "".join(out)
 
 
-def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]:
+def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     key = args.project_key
     now = dt.datetime.now(dt.timezone.utc)
     anchor = dt.date.fromisoformat(args.week_of) if args.week_of else (now.date() - dt.timedelta(days=7))
@@ -635,12 +970,21 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
         f"period={d(start)}..{d(end)} prior={d(p_start)}..{d(p_end)}"
     )
 
-    log("Report build phase: resolve Jira field ids.")
+    log("Report build phase: resolve mirrored field ids.")
     sev_field = cli.field_id(args.severity_field) or "Severity"
-    mttr_field = cli.field_id(args.mttr_field)
     mttd_field = cli.field_id(args.mttd_field)
+    mttt_field = cli.field_id(args.mttt_field)
+    mttr_field = cli.field_id(args.mttr_field)
+    mttc_field = cli.field_id(args.mttc_field)
     itime_field = cli.field_id(args.incident_time_field)
-    log(f"Fields: severity={sev_field} mttr={mttr_field} mttd={mttd_field} incident_time={itime_field}")
+    alert_time_field = cli.field_id(args.alert_time_field)
+    first_response_time_field = cli.field_id(args.first_response_time_field)
+    log(
+        "Fields: "
+        f"severity={sev_field} mttd={mttd_field} mttt={mttt_field} "
+        f"mttr={mttr_field} mttc={mttc_field} incident_time={itime_field} "
+        f"alert_time={alert_time_field} first_response_time={first_response_time_field}"
+    )
 
     inc_v2l, inc_standard_label_values = incident_sev_maps()
     inc_nids_v2l, inc_nids_label_values = nids_incident_sev_maps()
@@ -714,35 +1058,46 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
                for label in inc_labels]
     log(f"Incident severity counts done: {inc_sev}")
 
-    # ---- MTTD / MTTR (Jira fields, fallback to timestamps) ----
-    def avg_metric(jql: str, field_id: Optional[str], kind: str) -> Optional[float]:
-        debug(f"Report build metric start: {kind} field={field_id} jql={jql}")
-        want = [f for f in ["created", "resolutiondate", field_id, itime_field] if f]
+    # ---- incident lifecycle: event -> alert -> ticket -> response -> close ----
+    def avg_metric(jql: str, field_id: Optional[str], kind: str,
+                   start_field: Optional[str], end_field: Optional[str]) -> Optional[float]:
+        debug(
+            f"Report build metric start: {kind} duration_field={field_id} "
+            f"start_field={start_field} end_field={end_field} jql={jql}"
+        )
+        want = [f for f in [field_id, start_field, end_field] if f]
         issues = incident_search(jql, want, limit=2000)
         vals: List[float] = []
         for it in issues:
             f = it.get("fields", {})
-            sec = coerce_seconds(f.get(field_id), args.duration_unit) if field_id else None
-            if sec is None:  # fallback compute
-                created = parse_jira_dt(f.get("created"))
-                if kind == "mttr":
-                    resolved = parse_jira_dt(f.get("resolutiondate"))
-                    sec = (resolved - created).total_seconds() if created and resolved else None
-                else:  # mttd
-                    itime = parse_jira_dt(f.get(itime_field)) if itime_field else None
-                    sec = (created - itime).total_seconds() if created and itime else None
-            if sec is not None and sec >= 0:
+            sec = lifecycle_seconds(f, field_id, start_field, end_field, args.duration_unit)
+            if sec is not None:
                 vals.append(sec)
         avg = sum(vals) / len(vals) if vals else None
         log(f"Report build metric done: {kind} issue_count={len(issues)} usable_values={len(vals)} avg_seconds={avg}")
         return avg
 
-    log("Report build phase: MTTD/MTTR metrics.")
-    mttr = avg_metric(closed(INC_TYPES, start, end), mttr_field, "mttr")
-    mttd = avg_metric(opened(INC_TYPES, start, end), mttd_field, "mttd")
-    p_mttr = avg_metric(closed(INC_TYPES, p_start, p_end), mttr_field, "mttr")
-    p_mttd = avg_metric(opened(INC_TYPES, p_start, p_end), mttd_field, "mttd")
-    log(f"MTTD/MTTR metrics done: mttr={fmt_duration(mttr)} mttd={fmt_duration(mttd)} prior_mttr={fmt_duration(p_mttr)} prior_mttd={fmt_duration(p_mttd)}")
+    log("Report build phase: lifecycle metrics.")
+    lifecycle_specs = {
+        "mttd": (mttd_field, itime_field, alert_time_field, opened),
+        "mttt": (mttt_field, alert_time_field, "created", opened),
+        "mttr": (mttr_field, "created", first_response_time_field, opened),
+        "mttc": (mttc_field, itime_field, "resolutiondate", closed),
+    }
+    lifecycle: Dict[str, Optional[float]] = {}
+    prior_lifecycle: Dict[str, Optional[float]] = {}
+    for kind, (duration_field, start_field, end_field, window) in lifecycle_specs.items():
+        lifecycle[kind] = avg_metric(
+            window(INC_TYPES, start, end), duration_field, kind, start_field, end_field)
+        prior_lifecycle[kind] = avg_metric(
+            window(INC_TYPES, p_start, p_end), duration_field, kind, start_field, end_field)
+    mttd, mttt, mttr, mttc = (lifecycle[k] for k in ("mttd", "mttt", "mttr", "mttc"))
+    p_mttd, p_mttt, p_mttr, p_mttc = (prior_lifecycle[k] for k in ("mttd", "mttt", "mttr", "mttc"))
+    log(
+        "Lifecycle metrics done: "
+        f"mttd={fmt_duration(mttd)} mttt={fmt_duration(mttt)} "
+        f"mttr={fmt_duration(mttr)} mttc={fmt_duration(mttc)}"
+    )
 
     # ---- 6-week trend ----
     log("Report build phase: 6-week incident trend.")
@@ -818,7 +1173,11 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
 
     # ---- closed selected ----
     log("Report build phase: closed incident detail.")
-    closed_fields = ["summary", "issuetype", sev_field] + ([mttr_field] if mttr_field else []) + ["created", "resolutiondate", "components", "labels"]
+    closed_fields = (
+        ["summary", "issuetype", sev_field]
+        + [f for f in [mttc_field, itime_field] if f]
+        + ["created", "resolutiondate", "components", "labels"]
+    )
     closed_issues = incident_search(closed(INC_TYPES, start, end), closed_fields, limit=2000)
     closed_issues.sort(key=lambda it: (
         SEV_ORDER.index(incident_label(it.get("fields", {})) or "Low"),
@@ -829,15 +1188,12 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     for it in closed_issues:
         f = it.get("fields", {})
         lbl, cls = sev_label(f)
-        sec = coerce_seconds(f.get(mttr_field), args.duration_unit) if mttr_field else None
-        if sec is None:
-            c, r = parse_jira_dt(f.get("created")), parse_jira_dt(f.get("resolutiondate"))
-            sec = (r - c).total_seconds() if c and r else None
+        sec = lifecycle_seconds(f, mttc_field, itime_field, "resolutiondate", args.duration_unit)
         closed_rows.append({
             "ref": it["key"], "ref_url": f"{cli.browse_base}/browse/{it['key']}",
             "type": (f.get("issuetype") or {}).get("name", "").replace("Security ", ""),
             "sev": lbl, "sev_class": cls, "summary": f.get("summary", ""),
-            "source": source_of(f), "ttr": fmt_duration(sec),
+            "source": source_of(f), "ttc": fmt_duration(sec),
         })
     log(f"Closed incident detail done: issue_count={len(closed_issues)} row_count={len(closed_rows)}")
 
@@ -871,16 +1227,13 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     sla_secs = sla_targets()
     sla_buckets: Dict[str, List[int]] = {label: [0, 0] for label in inc_labels}  # label -> [met, total]
     for it in incident_search(closed(INC_TYPES, start, end),
-                              [sev_field, mttr_field, "created", "resolutiondate"] if mttr_field else [sev_field, "created", "resolutiondate"],
+                              [f for f in [sev_field, mttc_field, itime_field, "resolutiondate"] if f],
                               limit=2000):
         f = it.get("fields", {})
         lbl, _ = sev_label(f)
         if lbl not in sla_buckets:
             continue
-        sec = coerce_seconds(f.get(mttr_field), args.duration_unit) if mttr_field else None
-        if sec is None:
-            c, r = parse_jira_dt(f.get("created")), parse_jira_dt(f.get("resolutiondate"))
-            sec = (r - c).total_seconds() if c and r else None
+        sec = lifecycle_seconds(f, mttc_field, itime_field, "resolutiondate", args.duration_unit)
         if sec is None:
             continue
         sla_buckets[lbl][1] += 1
@@ -960,7 +1313,7 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
     elif _env_bool("REPORT_COMMENTARY_AUTO", True):
         commentary = auto_commentary(
             opened_n=opened_n, closed_n=closed_n, open_n=open_n, prev_open=p_open,
-            mttr_secs=mttr, inc_sla=sla, type_breakdown=type_breakdown, open_rows=open_rows,
+            mttc_secs=mttc, inc_sla=sla, type_breakdown=type_breakdown, open_rows=open_rows,
             include_vuln=include_vuln, v_resolved=v_resolved, v_new=v_new, vuln_sla=vuln_sla)
     else:
         commentary = ""
@@ -987,7 +1340,9 @@ def build_from_jira(cli: JiraClient, args: argparse.Namespace) -> Dict[str, Any]
             "closed": closed_n, "closed_delta": delta_html(closed_n, p_closed, favorable="up"),
             "open": open_n, "open_delta": delta_html(open_n, p_open, favorable="down"),
             "mttd": fmt_duration(mttd), "mttd_delta": _dur_delta(mttd, p_mttd),
+            "mttt": fmt_duration(mttt), "mttt_delta": _dur_delta(mttt, p_mttt),
             "mttr": fmt_duration(mttr), "mttr_delta": _dur_delta(mttr, p_mttr),
+            "mttc": fmt_duration(mttc), "mttc_delta": _dur_delta(mttc, p_mttc),
             "uptime": (args.supplemental_data.get("availability", {}).get("uptime", "—") if args.supplemental_data else "—"),
             "uptime_note": (f'SLA {args.supplemental_data.get("availability", {}).get("sla", "")} · met' if args.supplemental_data and args.supplemental_data.get("availability") else "provided separately"),
         },
@@ -1043,7 +1398,7 @@ def _find_cves(text: str) -> set:
     return {m.upper() for m in CVE_RE.findall(text or "")}
 
 
-def top_cves(cli: JiraClient, jql: str, args: argparse.Namespace, kind: str) -> List[Tuple[str, str, Any]]:
+def top_cves(cli: Any, jql: str, args: argparse.Namespace, kind: str) -> List[Tuple[str, str, Any]]:
     """Per ticket, take CVEs from the Vulnerability ID(s) field first; if that field
     has none, fall back to the description, then to the comments."""
     vid_field = cli.field_id(args.vuln_id_field)
@@ -1074,13 +1429,15 @@ def sample_data() -> Dict[str, Any]:
         "period_label": "Mon 29 Jun – Sun 5 Jul 2026", "week_start": "Monday", "_period_end": "2026-07-05",
         "generated": "6 Jul 2026, 09:01 ET", "support_email": "alerts@neuro.athenasecuritygrp.com",
         "preview_note": ("<strong>Template preview.</strong> Illustrative sample data — run "
-                         "<code>generate_report.py</code> against a client's SECOPS Jira project for live figures."),
+                         "<code>generate_report.py</code> against a client's pallas-incidents index for live figures."),
         "exec": {
             "opened": 72, "opened_delta": '<b class="up">▲ 14</b> vs last week',
             "closed": 66, "closed_delta": '<b class="up">▲ 6</b> vs last week',
             "open": 6, "open_delta": '<b class="up">▼ 5</b> vs last week',
             "mttd": "14 min", "mttd_delta": '<b class="up">▼ 3 min</b> vs last week',
-            "mttr": "3h 42m", "mttr_delta": '<b class="up">▼ 22 min</b> vs last week',
+            "mttt": "2 min", "mttt_delta": '<b class="up">▼ 1 min</b> vs last week',
+            "mttr": "11 min", "mttr_delta": '<b class="up">▼ 4 min</b> vs last week',
+            "mttc": "3h 42m", "mttc_delta": '<b class="up">▼ 22 min</b> vs last week',
             "uptime": "99.98%", "uptime_note": "SLA 99.9% · met",
         },
         "commentary": (
@@ -1129,10 +1486,10 @@ def sample_data() -> Dict[str, Any]:
         ],
         "closed_count": 66,
         "closed_rows": [
-            {"ref": "NSO-4790", "type": "Incident", "sev": "Critical", "sev_class": "crit", "summary": "Ransomware-pattern process quarantined (WKS-101)", "source": "Endpoint", "ttr": "2h 10m"},
-            {"ref": "NSO-4805", "type": "Alert", "sev": "High", "sev_class": "high", "summary": "Brute-force source IP blocked at firewall", "source": "NIDS", "ttr": "38m"},
-            {"ref": "NSO-4812", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Impossible-travel sign-in reviewed & cleared", "source": "Office 365", "ttr": "1h 05m"},
-            {"ref": "NSO-4818", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Phishing email quarantined & rule tuned", "source": "Office 365", "ttr": "12m"},
+            {"ref": "NSO-4790", "type": "Incident", "sev": "Critical", "sev_class": "crit", "summary": "Ransomware-pattern process quarantined (WKS-101)", "source": "Endpoint", "ttc": "2h 10m"},
+            {"ref": "NSO-4805", "type": "Alert", "sev": "High", "sev_class": "high", "summary": "Brute-force source IP blocked at firewall", "source": "NIDS", "ttc": "38m"},
+            {"ref": "NSO-4812", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Impossible-travel sign-in reviewed & cleared", "source": "Office 365", "ttc": "1h 05m"},
+            {"ref": "NSO-4818", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Phishing email quarantined & rule tuned", "source": "Office 365", "ttc": "12m"},
         ],
         "closed_more": 62,
         "device": {
@@ -1175,8 +1532,8 @@ def sample_data() -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Generate a weekly Security Operations Report from Jira.")
-    p.add_argument("--sample", action="store_true", help="Render with built-in sample data (no Jira needed).")
+    p = argparse.ArgumentParser(description="Generate a weekly Security Operations Report from OpenSearch.")
+    p.add_argument("--sample", action="store_true", help="Render with built-in sample data (no OpenSearch needed).")
     p.add_argument("--out", help="Explicit output path. Default: <out-dir>/<client>-<week-end>.html")
     p.add_argument("--out-dir", help="Directory for auto-named output (relative paths stay in this repo). Env: REPORT_OUTPUT_DIR (default: reports).")
     p.add_argument("--open", dest="open_after", action="store_true", help="Open the report when done.")
@@ -1193,17 +1550,21 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--week-of", help="Any date (YYYY-MM-DD) inside the target week. Default: last complete week.")
 
     p.add_argument("--severity-field", default="Severity")
-    p.add_argument("--mttr-field", default="MTTR (Minutes)")
-    p.add_argument("--mttd-field", default="MTTD (Minutes)")
-    p.add_argument("--incident-time-field", default="Incident Time")
+    p.add_argument("--mttd-field", help="Duration field for event-to-alert detection time. Env: JIRA_MTTD_FIELD.")
+    p.add_argument("--mttt-field", help="Duration field for alert-to-Jira-ticket time. Env: JIRA_MTTT_FIELD.")
+    p.add_argument("--mttr-field", help="Duration field for Jira-ticket-to-first-response time. Env: JIRA_MTTR_FIELD.")
+    p.add_argument("--mttc-field", help="Duration field for endpoint-event-to-close time. Env: JIRA_MTTC_FIELD.")
+    p.add_argument("--incident-time-field", help="Event occurrence timestamp field. Env: JIRA_INCIDENT_TIME_FIELD.")
+    p.add_argument("--alert-time-field", help="Athena Core alert generation timestamp field. Env: JIRA_ALERT_TIME_FIELD.")
+    p.add_argument("--first-response-time-field", help="First analyst response timestamp field. Env: JIRA_FIRST_RESPONSE_TIME_FIELD.")
     p.add_argument("--incident-type-field", default="Type of Incident", help="Field driving the 'Incidents by type' breakdown.")
     p.add_argument("--vuln-id-field", default="Vulnerability ID(s)")
     p.add_argument("--source-field", default="components", help="'components', 'labels', or a custom field name for the alert source.")
-    p.add_argument("--duration-unit", default="minutes", choices=["seconds", "minutes", "hours"], help="Unit of a numeric MTTR/MTTD field.")
+    p.add_argument("--duration-unit", default="minutes", choices=["seconds", "minutes", "hours"], help="Unit of numeric lifecycle duration fields.")
     p.add_argument("--max-open-rows", type=int, default=40)
     p.add_argument("--max-closed-rows", type=int, default=6)
 
-    p.add_argument("--supplemental", help="JSON file with device/endpoint/availability data (not in Jira).")
+    p.add_argument("--supplemental", help="JSON file with device/endpoint/availability data (not in the incident index).")
     p.add_argument("--email", action="store_true",
                    help="Also write an email-safe HTML version (<out>-email.html) for pasting into Outlook.")
 
@@ -1238,6 +1599,14 @@ def resolve_config(args: argparse.Namespace, site: str) -> None:
     args.environment = args.environment or os.getenv("REPORT_ENVIRONMENT") or "Production"
     args.tenant = args.tenant or os.getenv("REPORT_TENANT") or site.replace("https://", "").replace("http://", "")
     args.support_email = args.support_email or os.getenv("REPORT_SUPPORT_EMAIL") or f"secops@{args.tenant}"
+    # Pallas writes these four lifecycle values to pallas-incidents in minutes.
+    args.mttd_field = args.mttd_field or os.getenv("JIRA_MTTD_FIELD") or "MTTD (Minutes)"
+    args.mttt_field = args.mttt_field or os.getenv("JIRA_MTTT_FIELD") or "MTTT (Minutes)"
+    args.mttr_field = args.mttr_field or os.getenv("JIRA_MTTR_FIELD") or "MTTR (Minutes)"
+    args.mttc_field = args.mttc_field or os.getenv("JIRA_MTTC_FIELD") or "MTTC (Minutes)"
+    args.incident_time_field = args.incident_time_field or os.getenv("JIRA_INCIDENT_TIME_FIELD") or "Incident Time (Eastern Time - ET)"
+    args.alert_time_field = args.alert_time_field or os.getenv("JIRA_ALERT_TIME_FIELD") or "Alert Generated Time"
+    args.first_response_time_field = args.first_response_time_field or os.getenv("JIRA_FIRST_RESPONSE_TIME_FIELD") or "First Response Time"
     ws = (args.week_start or os.getenv("REPORT_WEEK_START") or "monday").lower()
     args.week_start = "sunday" if ws.startswith("sun") else "monday"
 
@@ -1269,10 +1638,7 @@ def main(argv: Sequence[str]) -> int:
         data = sample_data()
         log("Sample data build done.")
     else:
-        # OAuth mode discovers the site (cloud id) itself, so JIRA_SITE_URL is only
-        # required for the token / service-token auth modes.
         site = jira_site_url()
-        log(f"Jira site resolved: configured={bool(site)}")
         resolve_config(args, site)
         log(
             "Report config resolved: "
@@ -1283,13 +1649,13 @@ def main(argv: Sequence[str]) -> int:
             log("No project key. Pass --project-key or set JIRA_PROJECT_KEY in .env.", level="ERROR")
             return 2
         try:
-            log("Jira client build start.")
-            cli = build_jira_client(site)
-            log("Jira client build done.")
-        except JiraError as exc:
+            log("OpenSearch client build start.")
+            cli = OpenSearchClient.from_env()
+            log("OpenSearch client build done.")
+        except OpenSearchError as exc:
             log(str(exc), level="ERROR")
             return 2
-        data = build_from_jira(cli, args)
+        data = build_report(cli, args)
 
     data.setdefault("_sections_enabled", section_enablement())
 

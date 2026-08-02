@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Private REST API Gateway for manually dispatching the Athena incident report Lambda.
+Description: Private REST API Gateway dispatching tenant-specific, VPC-attached incident report Lambdas.
 
 Parameters:
   AppName:
@@ -29,12 +29,20 @@ Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: Existing VPC reachable from the AWS Client VPN.
-  SubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
-    Description: One or more existing private subnets for execute-api endpoint ENIs.
-  ClientVpnCidr:
+  ExistingExecuteApiVpcEndpointId:
     Type: String
-    Description: Source CIDR allowed to connect to the execute-api VPC endpoint.
+    Description: Existing execute-api endpoint reachable through the Client VPN.
+    AllowedPattern: "^vpce-[a-zA-Z0-9]+$"
+  AthenaWorkerSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Existing Athena private subnets allowed to reach the Athena indexer endpoint.
+  NbsWorkerSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Existing NBS private subnets allowed to reach the NBS indexer endpoint.
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: Existing VPC CIDR used for worker-to-indexer TCP 9200 egress.
     AllowedPattern: "^(([0-9]{1,3}\\.){3}[0-9]{1,3})/[0-9]{1,2}$"
   ApiStageName:
     Type: String
@@ -59,41 +67,31 @@ Parameters:
     Type: Number
     Default: 30
     AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+  ReportEmailFrom:
+    Type: String
+    Default: shelly@athenasecuritygrp.com
+    Description: Microsoft Graph mailbox used to send reports.
 
 Resources:
-  ApiEndpointSecurityGroup:
+  WorkerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub "${AppName}-${EnvironmentName} private API access from Client VPN"
+      GroupDescription: !Sub "${AppName}-${EnvironmentName} report workers"
       VpcId: !Ref VpcId
-      SecurityGroupIngress:
+      SecurityGroupEgress:
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: !Ref ClientVpnCidr
-          Description: Client VPN HTTPS access to the private report API
-      SecurityGroupEgress:
-        - IpProtocol: -1
           CidrIp: 0.0.0.0/0
+          Description: Secrets Manager and Microsoft Graph HTTPS
+        - IpProtocol: tcp
+          FromPort: 9200
+          ToPort: 9200
+          CidrIp: !Ref VpcCidr
+          Description: Tenant OpenSearch indexer HTTPS
       Tags:
         - Key: Name
-          Value: !Sub "${AppName}-${EnvironmentName}-private-api-sg"
-        - Key: Application
-          Value: !Ref AppName
-
-  ExecuteApiVpcEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcEndpointType: Interface
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.execute-api"
-      VpcId: !Ref VpcId
-      SubnetIds: !Ref SubnetIds
-      SecurityGroupIds:
-        - !Ref ApiEndpointSecurityGroup
-      PrivateDnsEnabled: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${AppName}-${EnvironmentName}-execute-api"
+          Value: !Sub "${AppName}-${EnvironmentName}-workers-sg"
         - Key: Application
           Value: !Ref AppName
 
@@ -116,7 +114,15 @@ Resources:
                 Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-${EnvironmentName}:*"
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppName}-${EnvironmentName}-*:*"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:AssignPrivateIpAddresses
+                  - ec2:UnassignPrivateIpAddresses
+                Resource: "*"
         - PolicyName: read-tenant-report-config-secrets
           PolicyDocument:
             Version: "2012-10-17"
@@ -128,10 +134,19 @@ Resources:
         - Key: Application
           Value: !Ref AppName
 
-  ReportLogGroup:
+  AthenaReportLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${AppName}-${EnvironmentName}"
+      LogGroupName: !Sub "/aws/lambda/${AppName}-${EnvironmentName}-athena"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+
+  NbsReportLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AppName}-${EnvironmentName}-nbs"
       RetentionInDays: !Ref LogRetentionDays
       Tags:
         - Key: Application
@@ -150,11 +165,11 @@ Resources:
       CompatibleRuntimes:
         - !Ref LambdaRuntime
 
-  ReportFunction:
+  AthenaReportFunction:
     Type: AWS::Lambda::Function
-    DependsOn: ReportLogGroup
+    DependsOn: AthenaReportLogGroup
     Properties:
-      FunctionName: !Sub "${AppName}-${EnvironmentName}"
+      FunctionName: !Sub "${AppName}-${EnvironmentName}-athena"
       Code:
         S3Bucket: !Ref SourceCodeS3Bucket
         S3Key: !Ref SourceCodeS3Key
@@ -168,9 +183,45 @@ Resources:
         - x86_64
       Layers:
         - !Ref ReportDependenciesLayer
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref WorkerSecurityGroup
+        SubnetIds: !Ref AthenaWorkerSubnetIds
       Environment:
         Variables:
           REPORT_ALLOW_GET: "false"
+          REPORT_EMAIL_FROM: !Ref ReportEmailFrom
+          REPORT_LAMBDA_SEND_EMAIL: "true"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+
+  NbsReportFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: NbsReportLogGroup
+    Properties:
+      FunctionName: !Sub "${AppName}-${EnvironmentName}-nbs"
+      Code:
+        S3Bucket: !Ref SourceCodeS3Bucket
+        S3Key: !Ref SourceCodeS3Key
+      Role: !GetAtt ReportExecutionRole.Arn
+      Runtime: !Ref LambdaRuntime
+      Handler: lambda_handler.handler
+      MemorySize: !Ref LambdaMemorySize
+      Timeout: !Ref LambdaTimeoutSeconds
+      ReservedConcurrentExecutions: !Ref ReservedConcurrentExecutions
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref ReportDependenciesLayer
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref WorkerSecurityGroup
+        SubnetIds: !Ref NbsWorkerSubnetIds
+      Environment:
+        Variables:
+          REPORT_ALLOW_GET: "false"
+          REPORT_EMAIL_FROM: !Ref ReportEmailFrom
           REPORT_LAMBDA_SEND_EMAIL: "true"
       Tags:
         - Key: Application
@@ -201,7 +252,9 @@ Resources:
                 Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:athena-incident-report/*/config-*"
               - Effect: Allow
                 Action: lambda:InvokeFunction
-                Resource: !GetAtt ReportFunction.Arn
+                Resource:
+                  - !GetAtt AthenaReportFunction.Arn
+                  - !GetAtt NbsReportFunction.Arn
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -232,7 +285,10 @@ Resources:
         - x86_64
       Environment:
         Variables:
-          REPORT_WORKER_FUNCTION_NAME: !Ref ReportFunction
+          REPORT_WORKER_FUNCTIONS: !Sub
+            - '{"athena":"${AthenaWorker}","nbs":"${NbsWorker}"}'
+            - AthenaWorker: !Ref AthenaReportFunction
+              NbsWorker: !Ref NbsReportFunction
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -245,8 +301,6 @@ Resources:
       EndpointConfiguration:
         Types:
           - PRIVATE
-        VpcEndpointIds:
-          - !Ref ExecuteApiVpcEndpoint
       Policy:
         Version: "2012-10-17"
         Statement:
@@ -260,7 +314,7 @@ Resources:
             Resource: "execute-api:/*"
             Condition:
               StringNotEquals:
-                aws:SourceVpce: !Ref ExecuteApiVpcEndpoint
+                aws:SourceVpce: !Ref ExistingExecuteApiVpcEndpointId
       Tags:
         - Key: Application
           Value: !Ref AppName
@@ -352,12 +406,16 @@ Outputs:
   RestApiId:
     Value: !Ref ReportApi
   ExecuteApiVpcEndpointId:
-    Value: !Ref ExecuteApiVpcEndpoint
-  ApiEndpointSecurityGroupId:
-    Value: !Ref ApiEndpointSecurityGroup
+    Value: !Ref ExistingExecuteApiVpcEndpointId
   DispatcherFunctionName:
     Value: !Ref DispatcherFunction
-  LambdaFunctionName:
-    Value: !Ref ReportFunction
-  LambdaFunctionArn:
-    Value: !GetAtt ReportFunction.Arn
+  WorkerSecurityGroupId:
+    Value: !Ref WorkerSecurityGroup
+  AthenaLambdaFunctionName:
+    Value: !Ref AthenaReportFunction
+  AthenaLambdaFunctionArn:
+    Value: !GetAtt AthenaReportFunction.Arn
+  NbsLambdaFunctionName:
+    Value: !Ref NbsReportFunction
+  NbsLambdaFunctionArn:
+    Value: !GetAtt NbsReportFunction.Arn

@@ -50,7 +50,8 @@ Allow update: $ALLOW_SECRET_UPDATE
 
 REPORT_EMAIL_TO and REPORT_EMAIL_CC are removed from the stored secret because
 they must be supplied with each API request. An existing REPORT_TRIGGER_TOKEN is
-preserved unless the env file includes a replacement.
+preserved unless the env file includes a replacement. REPORT_EMAIL_FROM is also
+removed because it is managed by the report Lambda environment.
 EOF
 
 read -r -p "Type APPLY to continue: " CONFIRM
@@ -109,8 +110,8 @@ except FileNotFoundError:
 if "REPORT_TRIGGER_TOKEN" in existing and "REPORT_TRIGGER_TOKEN" not in data:
     data["REPORT_TRIGGER_TOKEN"] = existing["REPORT_TRIGGER_TOKEN"]
 data.setdefault("REPORT_TRIGGER_TOKEN", secrets.token_urlsafe(32))
-for request_only in ("REPORT_EMAIL_TO", "REPORT_EMAIL_CC"):
-    data.pop(request_only, None)
+for excluded in ("REPORT_EMAIL_TO", "REPORT_EMAIL_CC", "REPORT_EMAIL_FROM"):
+    data.pop(excluded, None)
 
 with open(out_path, "w", encoding="utf-8") as handle:
     json.dump(data, handle, separators=(",", ":"))

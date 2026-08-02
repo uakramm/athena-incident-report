@@ -68,7 +68,7 @@ def resolve_email_config(args: argparse.Namespace, data: Dict[str, Any]) -> Dict
         "client_secret": os.getenv("ENTRA_CLIENT_SECRET") or "",
         "authority_host": _env("ENTRA_AUTHORITY_HOST", "https://login.microsoftonline.com").rstrip("/"),
         "graph_base_url": _env("GRAPH_BASE_URL", "https://graph.microsoft.com/v1.0").rstrip("/"),
-        "from_addr": _mailbox(_env("REPORT_EMAIL_FROM", "shelly@athenasecuritygrp.com") or data.get("support_email", "")),
+        "from_addr": _mailbox(_env("REPORT_EMAIL_FROM")),
         "save_to_sent_items": _env_bool("REPORT_EMAIL_SAVE_TO_SENT_ITEMS", True),
         # Body: "email" = table-based, renders reliably in Outlook/Gmail (default);
         # "full" = the SVG report inline (charts/colours break in Outlook & Gmail).

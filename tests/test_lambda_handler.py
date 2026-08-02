@@ -74,6 +74,24 @@ class DispatchHandlerTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 401)
         self.assertEqual(json.loads(response["body"])["error"], "Unauthorized.")
 
+    def test_tenant_worker_mapping_routes_nbs_to_nbs_worker(self) -> None:
+        client = mock.Mock()
+        client.invoke.return_value = {"StatusCode": 202}
+        boto3 = types.SimpleNamespace(client=mock.Mock(return_value=client))
+        event = _event("tenant=nbs&email_to=to%40example.com&email_cc=")
+        mapping = json.dumps({"athena": "athena-worker", "nbs": "nbs-worker"})
+
+        with (
+            mock.patch.object(lambda_handler, "_load_secret_env", return_value=[]),
+            mock.patch.object(lambda_handler, "_authorize", return_value=True),
+            mock.patch.dict(os.environ, {"REPORT_WORKER_FUNCTIONS": mapping}, clear=False),
+            mock.patch.dict(sys.modules, {"boto3": boto3}),
+        ):
+            response = lambda_handler.dispatch_handler(event, _Context())
+
+        self.assertEqual(response["statusCode"], 202)
+        self.assertEqual(client.invoke.call_args.kwargs["FunctionName"], "nbs-worker")
+
 
 if __name__ == "__main__":
     unittest.main()
