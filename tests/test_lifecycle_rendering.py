@@ -21,6 +21,15 @@ class LifecycleRenderingTests(unittest.TestCase):
             self.assertIn("Time to close", output)
             self.assertNotIn("Mean time to resolve", output)
 
+    def test_both_incident_tables_show_assignees(self) -> None:
+        data = generate_report.sample_data()
+
+        for output in (render.render_report(data, css=""), render_email.render_email(data)):
+            self.assertEqual(output.count("Assignee"), 2)
+            self.assertIn("Shelly Peralta", output)
+            self.assertIn("Joseph Khoury", output)
+            self.assertIn("Unassigned", output)
+
 
 if __name__ == "__main__":
     unittest.main()

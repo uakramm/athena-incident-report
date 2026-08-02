@@ -134,6 +134,10 @@ td.r{ text-align:right; }
 td .id{ font-weight:700; color:var(--link); font-variant-numeric:tabular-nums; }
 td .sum{ color:var(--ink); }
 .num-cell{ font-variant-numeric:tabular-nums; white-space:nowrap; }
+.incident-table{ table-layout:fixed; min-width:0; font-size:11px; }
+.incident-table thead th{ padding:9px 7px; font-size:9px; white-space:normal; }
+.incident-table tbody td{ padding:9px 7px; overflow-wrap:anywhere; }
+.incident-table .num-cell{ white-space:normal; }
 .subtle{ color:var(--muted); }
 .cnt-crit{ color:var(--crit-ink); font-weight:700; font-variant-numeric:tabular-nums; }
 .cnt-high{ color:var(--high-ink); font-weight:700; font-variant-numeric:tabular-nums; }

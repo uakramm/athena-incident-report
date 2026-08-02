@@ -302,6 +302,7 @@ def _inc_open_rows(rows: Sequence[Dict[str, Any]]) -> str:
             f"<td>{esc(r['source'])}</td>"
             f'<td class="num-cell">{esc(r["opened"])}</td>'
             f'<td class="num-cell">{esc(r["age"])}</td>'
+            f'<td class="owner">{esc(r.get("assignee") or "Unassigned")}</td>'
             f"<td>{esc(r['status'])}</td>"
             "</tr>"
         )
@@ -319,12 +320,17 @@ def _inc_closed_rows(rows: Sequence[Dict[str, Any]], more: int) -> str:
             f'<td>{_pill(r["sev_class"], r["sev"])}</td>'
             f'<td class="sum">{esc(r["summary"])}</td>'
             f"<td>{esc(r['source'])}</td>"
+            f'<td class="owner">{esc(r.get("assignee") or "Unassigned")}</td>'
             f'<td class="r num-cell">{esc(r["ttc"])}</td>'
             "</tr>"
         )
     if more > 0:
-        out.append(f'<tr><td colspan="6" class="subtle" style="text-align:center;">+ {more:,} further items resolved this week — full log available on request</td></tr>')
+        out.append(f'<tr><td colspan="7" class="subtle" style="text-align:center;">+ {more:,} further items resolved this week — full log available on request</td></tr>')
     return "".join(out)
+
+
+def _table_cols(widths: Sequence[int]) -> str:
+    return "<colgroup>" + "".join(f'<col style="width:{width}%">' for width in widths) + "</colgroup>"
 
 
 def _incidents(d: Dict[str, Any], n: int = 2) -> str:
@@ -383,12 +389,16 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
         + sev_card + extra +
         f'<p class="caption">{d.get("inc_summary_line", "")}</p>'
         f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Open — currently in handling ({len(d["open_rows"])})</h3>'
-        '<div class="tbl-wrap"><table><thead><tr>'
-        "<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th>Opened</th><th>Age</th><th>Status</th>"
+        '<div class="tbl-wrap"><table class="incident-table"><colgroup>'
+        '<col style="width:8%"><col style="width:9%"><col style="width:11%"><col style="width:25%">'
+        '<col style="width:10%"><col style="width:9%"><col style="width:6%"><col style="width:12%"><col style="width:10%">'
+        '</colgroup><thead><tr>'
+        "<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th>Opened</th><th>Age</th><th>Assignee</th><th>Status</th>"
         f"</tr></thead><tbody>{open_rows}</tbody></table></div>"
         f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Closed this week ({d["closed_count"]:,}) — selected</h3>'
-        '<div class="tbl-wrap"><table><thead><tr>'
-        '<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th class="r">Time to close</th>'
+        '<div class="tbl-wrap"><table class="incident-table">'
+        f'{_table_cols([8, 9, 11, 34, 11, 14, 13])}<thead><tr>'
+        '<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th>Assignee</th><th class="r">Time to close</th>'
         f"</tr></thead><tbody>{closed_rows}</tbody></table></div></section>"
     )
 

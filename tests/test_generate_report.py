@@ -83,6 +83,7 @@ class OpenSearchClientTests(unittest.TestCase):
             "jira_created_at": "2026-07-13T12:00:00Z",
             "jira_status": "Open",
             "jira_status_category": "In Progress",
+            "jira_assignee": "Shelly Peralta",
             "severity": "high",
             "alert_source": "office365",
             "rule_description": "Suspicious email",
@@ -101,6 +102,7 @@ class OpenSearchClientTests(unittest.TestCase):
         self.assertEqual(issue["fields"]["severity"]["value"], "Sev-2")
         self.assertEqual(issue["fields"]["mttd_minutes"], 3.5)
         self.assertEqual(issue["fields"]["status"]["statusCategory"]["name"], "In Progress")
+        self.assertEqual(issue["fields"]["assignee"]["displayName"], "Shelly Peralta")
 
     def test_suricata_critical_uses_nids_sev_2(self) -> None:
         client = self._client([{

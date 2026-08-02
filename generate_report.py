@@ -608,6 +608,9 @@ class OpenSearchClient:
                 "created": doc.get("jira_created_at") or doc.get("created_at"),
                 "resolutiondate": resolved_at,
                 "status": {"name": status_name, "statusCategory": {"name": "Done" if done else "In Progress"}},
+                "assignee": {
+                    "displayName": str(doc.get("jira_assignee") or "").strip()
+                } if doc.get("jira_assignee") else None,
                 "components": [{"name": source}],
                 "labels": [str(item) for item in (doc.get("rule_groups") or [])],
                 "source": source,
@@ -628,7 +631,7 @@ class OpenSearchClient:
     def field_id(self, name: str) -> Optional[str]:
         if name in {
             "created", "resolutiondate", "status", "summary", "issuetype",
-            "components", "labels", "description", "comment",
+            "components", "labels", "description", "comment", "assignee",
         }:
             return name
         return self.FIELD_IDS.get(name.strip().lower(), name if name in self.FIELD_IDS.values() else None)
@@ -1129,7 +1132,9 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     # ---- open incidents detail ----
     log("Report build phase: open incident detail.")
     src_field = cli.field_id(args.source_field) if args.source_field not in ("components", "labels") else args.source_field
-    det_fields = ["summary", "issuetype", "status", "created", "components", "labels", sev_field]
+    det_fields = [
+        "summary", "issuetype", "status", "assignee", "created", "components", "labels", sev_field,
+    ]
     if src_field and src_field not in det_fields:
         det_fields.append(src_field)
     open_issues = incident_search(
@@ -1151,6 +1156,18 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
         label = incident_label(f) or (inc_labels[-1] if inc_labels else "Medium")
         return label, render.SEV_CLASS[label]
 
+    def assignee_of(f: Dict[str, Any]) -> str:
+        value = f.get("assignee")
+        if isinstance(value, dict):
+            value = (
+                value.get("displayName")
+                or value.get("name")
+                or value.get("value")
+                or value.get("emailAddress")
+                or value.get("accountId")
+            )
+        return str(value).strip() if value else "Unassigned"
+
     open_issues.sort(key=lambda it: (
         SEV_ORDER.index(incident_label(it.get("fields", {})) or "Low"),
         parse_jira_dt(it.get("fields", {}).get("created")) or now,
@@ -1167,14 +1184,15 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
             "sev": lbl, "sev_class": cls,
             "summary": f.get("summary", ""), "source": source_of(f),
             "opened": strip_leading_zero(created.strftime("%d %b %H:%M")) if created else "—",
-            "age": fmt_age(created, now), "status": (f.get("status") or {}).get("name", ""),
+            "age": fmt_age(created, now), "assignee": assignee_of(f),
+            "status": (f.get("status") or {}).get("name", ""),
         })
     log(f"Open incident detail done: issue_count={len(open_issues)} row_count={len(open_rows)}")
 
     # ---- closed selected ----
     log("Report build phase: closed incident detail.")
     closed_fields = (
-        ["summary", "issuetype", sev_field]
+        ["summary", "issuetype", "assignee", sev_field]
         + [f for f in [mttc_field, itime_field] if f]
         + ["created", "resolutiondate", "components", "labels"]
     )
@@ -1193,7 +1211,7 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
             "ref": it["key"], "ref_url": f"{cli.browse_base}/browse/{it['key']}",
             "type": (f.get("issuetype") or {}).get("name", "").replace("Security ", ""),
             "sev": lbl, "sev_class": cls, "summary": f.get("summary", ""),
-            "source": source_of(f), "ttc": fmt_duration(sec),
+            "source": source_of(f), "assignee": assignee_of(f), "ttc": fmt_duration(sec),
         })
     log(f"Closed incident detail done: issue_count={len(closed_issues)} row_count={len(closed_rows)}")
 
@@ -1477,19 +1495,19 @@ def sample_data() -> Dict[str, Any]:
         ],
         "inc_summary_line": "We closed <b>66 of 72</b> items raised this week and cleared 5 from prior backlog — ending the week with 6 open, all in active handling below.",
         "open_rows": [
-            {"ref": "NSO-4821", "type": "Incident", "sev": "Critical", "sev_class": "crit", "summary": "Outbound C2 beaconing blocked at WAF (185.220.101.44)", "source": "NIDS", "opened": "4 Jul 09:12", "age": "1d 4h", "status": "Work in progress"},
-            {"ref": "NSO-4835", "type": "Alert", "sev": "High", "sev_class": "high", "summary": "Repeated failed admin sign-ins — Microsoft 365", "source": "Office 365", "opened": "4 Jul 22:40", "age": "14h", "status": "Pending"},
-            {"ref": "NSO-4840", "type": "Alert", "sev": "High", "sev_class": "high", "summary": "Defender real-time protection off (LAP-014)", "source": "Defender", "opened": "5 Jul 07:05", "age": "6h", "status": "Work in progress"},
-            {"ref": "NSO-4844", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Suspicious PowerShell execution (WKS-233)", "source": "Endpoint", "opened": "5 Jul 10:22", "age": "3h", "status": "Monitoring"},
-            {"ref": "NSO-4849", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Cloudflare WAF rule triggered — SQL-injection attempt", "source": "Cloudflare", "opened": "5 Jul 11:48", "age": "1h", "status": "Work in progress"},
-            {"ref": "NSO-4852", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Phishing email quarantined — sender rule tuned", "source": "Office 365", "opened": "5 Jul 13:10", "age": "20m", "status": "Monitoring"},
+            {"ref": "NSO-4821", "type": "Incident", "sev": "Critical", "sev_class": "crit", "summary": "Outbound C2 beaconing blocked at WAF (185.220.101.44)", "source": "NIDS", "opened": "4 Jul 09:12", "age": "1d 4h", "assignee": "Shelly Peralta", "status": "Work in progress"},
+            {"ref": "NSO-4835", "type": "Alert", "sev": "High", "sev_class": "high", "summary": "Repeated failed admin sign-ins — Microsoft 365", "source": "Office 365", "opened": "4 Jul 22:40", "age": "14h", "assignee": "Shelly Peralta", "status": "Pending"},
+            {"ref": "NSO-4840", "type": "Alert", "sev": "High", "sev_class": "high", "summary": "Defender real-time protection off (LAP-014)", "source": "Defender", "opened": "5 Jul 07:05", "age": "6h", "assignee": "Joseph Khoury", "status": "Work in progress"},
+            {"ref": "NSO-4844", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Suspicious PowerShell execution (WKS-233)", "source": "Endpoint", "opened": "5 Jul 10:22", "age": "3h", "assignee": "Unassigned", "status": "Monitoring"},
+            {"ref": "NSO-4849", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Cloudflare WAF rule triggered — SQL-injection attempt", "source": "Cloudflare", "opened": "5 Jul 11:48", "age": "1h", "assignee": "Joseph Khoury", "status": "Work in progress"},
+            {"ref": "NSO-4852", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Phishing email quarantined — sender rule tuned", "source": "Office 365", "opened": "5 Jul 13:10", "age": "20m", "assignee": "Shelly Peralta", "status": "Monitoring"},
         ],
         "closed_count": 66,
         "closed_rows": [
-            {"ref": "NSO-4790", "type": "Incident", "sev": "Critical", "sev_class": "crit", "summary": "Ransomware-pattern process quarantined (WKS-101)", "source": "Endpoint", "ttc": "2h 10m"},
-            {"ref": "NSO-4805", "type": "Alert", "sev": "High", "sev_class": "high", "summary": "Brute-force source IP blocked at firewall", "source": "NIDS", "ttc": "38m"},
-            {"ref": "NSO-4812", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Impossible-travel sign-in reviewed & cleared", "source": "Office 365", "ttc": "1h 05m"},
-            {"ref": "NSO-4818", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Phishing email quarantined & rule tuned", "source": "Office 365", "ttc": "12m"},
+            {"ref": "NSO-4790", "type": "Incident", "sev": "Critical", "sev_class": "crit", "summary": "Ransomware-pattern process quarantined (WKS-101)", "source": "Endpoint", "assignee": "Shelly Peralta", "ttc": "2h 10m"},
+            {"ref": "NSO-4805", "type": "Alert", "sev": "High", "sev_class": "high", "summary": "Brute-force source IP blocked at firewall", "source": "NIDS", "assignee": "Joseph Khoury", "ttc": "38m"},
+            {"ref": "NSO-4812", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Impossible-travel sign-in reviewed & cleared", "source": "Office 365", "assignee": "Shelly Peralta", "ttc": "1h 05m"},
+            {"ref": "NSO-4818", "type": "Alert", "sev": "Medium", "sev_class": "med", "summary": "Phishing email quarantined & rule tuned", "source": "Office 365", "assignee": "Shelly Peralta", "ttc": "12m"},
         ],
         "closed_more": 62,
         "device": {

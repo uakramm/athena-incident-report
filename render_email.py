@@ -409,15 +409,17 @@ def _legend(items: Sequence[Tuple[str, str]]) -> str:
 
 def _incident_table(rows: Sequence[Dict[str, Any]], closed: bool, more: int = 0) -> str:
     if closed:
-        heads = ["Ref", "Type", "Severity", "Summary", "Source", "Time to close"]
-        aligns = ["left", "left", "left", "left", "left", "right"]
+        heads = ["Ref", "Type", "Severity", "Summary", "Source", "Assignee", "Time to close"]
+        aligns = ["left", "left", "left", "left", "left", "left", "right"]
+        widths = [8, 9, 11, 34, 11, 14, 13]
     else:
-        heads = ["Ref", "Type", "Severity", "Summary", "Source", "Opened", "Age", "Status"]
-        aligns = ["left"] * 5 + ["left", "left", "left"]
+        heads = ["Ref", "Type", "Severity", "Summary", "Source", "Opened", "Age", "Assignee", "Status"]
+        aligns = ["left"] * 9
+        widths = [8, 9, 11, 25, 10, 9, 6, 12, 10]
     th = "".join(
-        f'<td align="{a}" style="{FONT}font-size:10px;text-transform:uppercase;letter-spacing:0.5px;'
-        f'color:{MUTED};font-weight:bold;padding:9px 10px;background:{PANEL};border-bottom:1px solid {LINE};">{esc(h)}</td>'
-        for h, a in zip(heads, aligns)
+        f'<td width="{w}%" align="{a}" style="{FONT}font-size:9px;text-transform:uppercase;letter-spacing:0.5px;'
+        f'color:{MUTED};font-weight:bold;padding:8px 6px;background:{PANEL};border-bottom:1px solid {LINE};">{esc(h)}</td>'
+        for h, a, w in zip(heads, aligns, widths)
     )
     body = []
     for r in rows:
@@ -431,12 +433,16 @@ def _incident_table(rows: Sequence[Dict[str, Any]], closed: bool, more: int = 0)
             esc(r["source"]),
         ]
         if closed:
-            cells.append(esc(r["ttc"]))
+            cells += [esc(r.get("assignee") or "Unassigned"), esc(r["ttc"])]
         else:
-            cells += [esc(r["opened"]), esc(r["age"]), esc(r["status"])]
+            cells += [
+                esc(r["opened"]), esc(r["age"]),
+                esc(r.get("assignee") or "Unassigned"), esc(r["status"]),
+            ]
         tds = "".join(
-            f'<td align="{a}" valign="top" style="{FONT}font-size:12px;color:{INK2};padding:9px 10px;border-bottom:1px solid {LINE};">{c}</td>'
-            for c, a in zip(cells, aligns)
+            f'<td width="{w}%" align="{a}" valign="top" style="{FONT}font-size:11px;color:{INK2};padding:8px 6px;'
+            f'border-bottom:1px solid {LINE};overflow-wrap:anywhere;">{c}</td>'
+            for c, a, w in zip(cells, aligns, widths)
         )
         body.append(f"<tr>{tds}</tr>")
     if more > 0:
@@ -446,7 +452,7 @@ def _incident_table(rows: Sequence[Dict[str, Any]], closed: bool, more: int = 0)
         )
     return (
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAPER}" '
-        f'style="border:1px solid {LINE};border-radius:10px;border-collapse:collapse;">'
+        f'style="border:1px solid {LINE};border-radius:10px;border-collapse:collapse;table-layout:fixed;">'
         f'<tr>{th}</tr>{"".join(body)}</table>'
     )
 
