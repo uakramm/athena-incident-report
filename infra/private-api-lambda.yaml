@@ -33,6 +33,10 @@ Parameters:
     Type: String
     Description: Existing execute-api endpoint reachable through the Client VPN.
     AllowedPattern: "^vpce-[a-zA-Z0-9]+$"
+  ExistingExecuteApiVpcId:
+    Type: String
+    Description: VPC containing the existing execute-api endpoint.
+    AllowedPattern: "^vpc-[a-zA-Z0-9]+$"
   AthenaWorkerSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
     Description: Existing Athena private subnets allowed to reach the Athena indexer endpoint.
@@ -315,6 +319,7 @@ Resources:
             Condition:
               StringNotEquals:
                 aws:SourceVpce: !Ref ExistingExecuteApiVpcEndpointId
+                aws:SourceVpc: !Ref ExistingExecuteApiVpcId
       Tags:
         - Key: Application
           Value: !Ref AppName

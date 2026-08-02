@@ -18,6 +18,7 @@ PYTHON_VERSION="${LAMBDA_RUNTIME#python}"
 : "${ATHENA_WORKER_SUBNET_IDS:=subnet-067eaeb0d95d1863d,subnet-09e7bd629135490dd}"
 : "${NBS_WORKER_SUBNET_IDS:=subnet-09dbc0c83d29faceb,subnet-00964885c28178ee5}"
 : "${TRIGGER_VPCE_ID:=vpce-002df2e6240cd5e10}"
+: "${TRIGGER_VPC_ID:=vpc-05b4f0960588d3016}"
 : "${TRIGGER_VPCE_DNS:=vpce-002df2e6240cd5e10-h8m419sk.execute-api.us-east-2.vpce.amazonaws.com}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,6 +53,7 @@ Stack:                   $STACK_NAME
 Artifact bucket:         $ARTIFACT_BUCKET
 VPC:                     $VPC_ID ($VPC_CIDR)
 Existing API endpoint:   $TRIGGER_VPCE_ID
+Existing endpoint VPC:   $TRIGGER_VPC_ID
 Athena worker subnets:   $ATHENA_WORKER_SUBNET_IDS
 NBS worker subnets:      $NBS_WORKER_SUBNET_IDS
 API stage:               $API_STAGE_NAME
@@ -119,6 +121,7 @@ aws cloudformation deploy \
     "VpcId=$VPC_ID" \
     "VpcCidr=$VPC_CIDR" \
     "ExistingExecuteApiVpcEndpointId=$TRIGGER_VPCE_ID" \
+    "ExistingExecuteApiVpcId=$TRIGGER_VPC_ID" \
     "AthenaWorkerSubnetIds=$ATHENA_WORKER_SUBNET_IDS" \
     "NbsWorkerSubnetIds=$NBS_WORKER_SUBNET_IDS" \
     "ApiStageName=$API_STAGE_NAME"
