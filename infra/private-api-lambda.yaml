@@ -379,7 +379,7 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ReportApi}/*/POST/run"
 
-  ReportApiDeployment:
+  ReportApiDeploymentPolicyV2:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - RunPostMethod
@@ -392,7 +392,7 @@ Resources:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref ReportApi
-      DeploymentId: !Ref ReportApiDeployment
+      DeploymentId: !Ref ReportApiDeploymentPolicyV2
       StageName: !Ref ApiStageName
       Tags:
         - Key: Application
