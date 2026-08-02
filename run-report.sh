@@ -16,7 +16,7 @@ EOF
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_REPORT_API_URL="https://vpce-002df2e6240cd5e10-h8m419sk.execute-api.us-east-2.vpce.amazonaws.com/manual"
+DEFAULT_REPORT_API_URL="https://vpce-03a5eb5e01410703c-p0w0u5sx.execute-api.us-east-2.vpce.amazonaws.com/manual"
 DEFAULT_REPORT_API_ID="vw0zn1eu5d"
 TENANT="${1:-}"
 MODE="${2:-}"

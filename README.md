@@ -83,7 +83,10 @@ OpenVPN / Client VPN -> execute-api VPC endpoint -> Private REST API
                     -> OpenSearch + Microsoft Graph
 ```
 
-The private API is restricted to its `execute-api` interface VPC endpoint. There
+The private API is restricted to its `execute-api` interface VPC endpoint. The
+endpoint is managed by the standalone `athena-incident-report-private-api-access`
+stack in the shared Client VPN account, so deleting an application/test stack
+does not remove production report access. There
 is no public API endpoint, load balancer, scheduler, or recurring health-check
 Lambda invocation. Production uses separate Athena and NBS workers in their
 existing tenant subnets so each worker can reach its tenant's private indexer
@@ -167,6 +170,7 @@ Deployment files:
 
 - `lambda_handler.py` - private API dispatcher and report worker handlers.
 - `infra/private-api-lambda.yaml` - Private REST API, VPC endpoint, and Lambda resources.
+- `infra/private-api-access.yaml` - standalone Client VPN execute-api endpoint and security group.
 - `infra/deploy-private-api-lambda.sh` - guarded zip/layer packaging and ALB migration.
 - `infra/deploy-prod-private-api-lambda.sh` - guarded production deployment using `athena-prod`.
 - `infra/sync-tenant-secret.sh` - guarded tenant secret create/update helper.

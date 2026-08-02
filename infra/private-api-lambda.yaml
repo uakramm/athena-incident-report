@@ -379,20 +379,20 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ReportApi}/*/POST/run"
 
-  ReportApiDeploymentPolicyV2:
+  ReportApiDeploymentPolicyV3:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - RunPostMethod
       - HealthGetMethod
     Properties:
       RestApiId: !Ref ReportApi
-      Description: !Sub "Private report API deployment for ${SourceCodeS3Key}"
+      Description: !Sub "Private report API deployment for ${SourceCodeS3Key} via ${ExistingExecuteApiVpcEndpointId}"
 
   ReportApiStage:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref ReportApi
-      DeploymentId: !Ref ReportApiDeploymentPolicyV2
+      DeploymentId: !Ref ReportApiDeploymentPolicyV3
       StageName: !Ref ApiStageName
       Tags:
         - Key: Application
