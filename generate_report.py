@@ -430,7 +430,7 @@ class OpenSearchClient:
             self.session.auth = (username, password)
             self.session.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
         self._issues: Optional[List[Dict[str, Any]]] = (
-            [self._to_issue(doc) for doc in documents] if documents is not None else None
+            self._documents_to_issues(documents) if documents is not None else None
         )
 
     @classmethod
@@ -470,7 +470,7 @@ class OpenSearchClient:
         if self._issues is not None:
             return self._issues
         log(f"OpenSearch load start: endpoint={self.base} index={self.index}")
-        issues: List[Dict[str, Any]] = []
+        documents: List[Dict[str, Any]] = []
         search_after: Optional[List[Any]] = None
         page = 0
         while True:
@@ -490,28 +490,123 @@ class OpenSearchClient:
             for hit in hits:
                 source = dict(hit.get("_source") or {})
                 source.setdefault("_doc_id", hit.get("_id"))
-                issues.append(self._to_issue(source))
-            debug(f"OpenSearch page {page}: fetched={len(hits)} accumulated={len(issues)}")
+                documents.append(source)
+            debug(f"OpenSearch page {page}: fetched={len(hits)} accumulated={len(documents)}")
             if len(hits) < body["size"]:
                 break
             next_sort = hits[-1].get("sort")
             if not next_sort or next_sort == search_after:
                 raise OpenSearchError("OpenSearch pagination did not advance.")
             search_after = next_sort
-        self._issues = issues
-        log(f"OpenSearch load done: Jira-linked documents={len(issues)}")
-        return issues
+        self._issues = self._documents_to_issues(documents)
+        log(
+            "OpenSearch load done: "
+            f"Jira-linked documents={len(documents)} unique_tickets={len(self._issues)}"
+        )
+        return self._issues
+
+    @staticmethod
+    def _document_freshness(doc: Dict[str, Any]) -> Tuple[float, int]:
+        timestamps: List[float] = []
+        for key in ("jira_updated_at", "jira_synced_at", "updated_at", "closed_at"):
+            parsed = parse_jira_dt(str(doc.get(key) or ""))
+            if parsed:
+                timestamps.append(parsed.timestamp())
+        populated = sum(1 for value in doc.values() if value not in (None, "", [], {}))
+        return (max(timestamps) if timestamps else 0.0, populated)
+
+    @classmethod
+    def _documents_to_issues(cls, documents: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Use one mirrored document per Jira ticket, preferring the freshest copy."""
+        selected: Dict[str, Dict[str, Any]] = {}
+        for doc in documents:
+            key = str(doc.get("jira_ticket_id") or "").strip()
+            if not key:
+                continue
+            current = selected.get(key)
+            if current is None or cls._document_freshness(doc) > cls._document_freshness(current):
+                selected[key] = doc
+        duplicates = len(documents) - len(selected)
+        if duplicates:
+            log(f"OpenSearch deduplication: removed={duplicates} duplicate Jira ticket documents")
+        return [cls._to_issue(doc) for doc in selected.values()]
 
     @staticmethod
     def _is_vulnerability(doc: Dict[str, Any]) -> bool:
-        groups = " ".join(str(item) for item in (doc.get("rule_groups") or []))
         alert_data = doc.get("alert_data") if isinstance(doc.get("alert_data"), dict) else {}
-        text = " ".join([
-            groups,
+        context = " ".join([
             str(doc.get("rule_description") or ""),
+            " ".join(str(item) for item in (doc.get("rule_groups") or [])),
             json.dumps(alert_data, default=str),
         ]).lower()
-        return "vulnerability" in text or bool(CVE_RE.search(text))
+        sources = {
+            re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+            for value in (
+                doc.get("alert_source"),
+                alert_data.get("vendor_source"),
+                alert_data.get("source"),
+            )
+            if value
+        }
+        # Pallas routes GitHub Dependabot/security-advisory findings to Jira's
+        # Vulnerability issue type. This source is authoritative for that route.
+        if "github" in sources or re.search(
+            r"\bgithub\b|repository_vulnerability_alert|\bghsa-[a-z0-9-]+\b", context
+        ):
+            return True
+        explicit_types = (
+            doc.get("jira_issue_type"),
+            doc.get("jira_request_type"),
+            doc.get("issue_type"),
+            alert_data.get("jira_issue_type"),
+            alert_data.get("request_type"),
+        )
+        for value in explicit_types:
+            if isinstance(value, dict):
+                value = value.get("name") or value.get("value")
+            normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+            if normalized in {"vulnerability", "vulnerability finding"}:
+                return True
+
+        groups: List[str] = [str(item) for item in (doc.get("rule_groups") or []) if item]
+        for key in ("rule_groups", "groups"):
+            value = alert_data.get(key)
+            if isinstance(value, (list, tuple)):
+                groups.extend(str(item) for item in value if item)
+            elif value:
+                groups.extend(part.strip() for part in str(value).split(",") if part.strip())
+        category = alert_data.get("category")
+        if category:
+            groups.extend(part.strip() for part in str(category).split(",") if part.strip())
+        normalized_groups = {
+            re.sub(r"[^a-z0-9]+", "_", group.lower()).strip("_") for group in groups
+        }
+        # Vendor endpoint alerts can include vulnerability context/groups while
+        # Pallas still routes them to Security Alert. Only the Wazuh detector
+        # pipeline and explicit Jira/GitHub routes represent Jira Vulnerability.
+        vendor_sources = sources - {"wazuh", "local", "unknown"}
+        if not vendor_sources and "wazuh" in sources and normalized_groups & {
+            "vulnerability", "vulnerability_detector"
+        }:
+            return True
+
+        # Legacy vulnerability-detector documents did not always preserve
+        # rule_groups in pallas-incidents. Their generated rule title is still
+        # deterministic; unlike a generic incident narrative, it begins with a
+        # CVE and the word "affects".
+        descriptions = (
+            doc.get("rule_description"),
+            alert_data.get("rule_description"),
+            alert_data.get("description"),
+        )
+        has_other_vendor_context = bool(re.search(
+            r"\b(?:defender|sophos|cloudflare|intune|guard\s*duty|office\s*365)\b",
+            context,
+        ))
+        return not vendor_sources and not has_other_vendor_context and "wazuh" in sources and any(
+            re.match(r"^\s*CVE-\d{4}-\d{3,7}\s+affects\b", str(value or ""), re.IGNORECASE)
+            for value in descriptions
+        )
 
     @staticmethod
     def _is_nids(doc: Dict[str, Any]) -> bool:
@@ -545,7 +640,7 @@ class OpenSearchClient:
         return mapping.get(label, standard.get(label, "Sev-4"))
 
     @staticmethod
-    def _source(doc: Dict[str, Any]) -> str:
+    def _source(doc: Dict[str, Any], summary: str = "") -> str:
         alert_data = doc.get("alert_data") if isinstance(doc.get("alert_data"), dict) else {}
         raw = (
             alert_data.get("vendor_source")
@@ -553,14 +648,101 @@ class OpenSearchClient:
             or doc.get("alert_source")
             or "Unknown"
         )
-        return str(raw).replace("_", " ").strip().title()
+        raw_text = str(raw).strip()
+        normalized = re.sub(r"[^a-z0-9]+", "", raw_text.lower())
+        source_names = {
+            "office365": "Office 365",
+            "microsoft365": "Office 365",
+            "m365": "Office 365",
+            "awsguardduty": "GuardDuty",
+            "guardduty": "GuardDuty",
+            "suricata": "Suricata",
+            "nids": "Suricata",
+            "microsoftdefender": "Microsoft Defender",
+            "defender": "Microsoft Defender",
+            "sophos": "Sophos",
+            "cloudflare": "Cloudflare",
+            "intune": "Intune",
+            "snyk": "Snyk",
+            "github": "GitHub",
+            "crowdstrike": "CrowdStrike",
+        }
+        if normalized in source_names:
+            return source_names[normalized]
+
+        context = " ".join([
+            summary,
+            str(doc.get("rule_description") or ""),
+            " ".join(str(item) for item in (doc.get("rule_groups") or [])),
+            json.dumps(alert_data, default=str),
+        ]).lower()
+        patterns = (
+            (r"\bsuricata\b|\bnids\b", "Suricata"),
+            (r"\bguard\s*duty\b|\baws_guardduty\b", "GuardDuty"),
+            (r"\boffice\s*365\b|\bmicrosoft\s*365\b|\bexchange online protection\b", "Office 365"),
+            (r"\bmicrosoft defender\b|\bdefender for (?:office|endpoint)\b", "Microsoft Defender"),
+            (r"\bsophos\b", "Sophos"),
+            (r"\bcloudflare\b", "Cloudflare"),
+            (r"\bintune\b", "Intune"),
+            (r"\bsnyk\b", "Snyk"),
+            (r"\bgithub\b", "GitHub"),
+            (r"\bcrowdstrike\b", "CrowdStrike"),
+        )
+        for pattern, name in patterns:
+            if re.search(pattern, context, re.IGNORECASE):
+                return name
+        return raw_text.replace("_", " ").strip().title() or "Unknown"
+
+    @staticmethod
+    def _incident_type(
+        doc: Dict[str, Any], alert_data: Dict[str, Any], source: str, vulnerability: bool
+    ) -> str:
+        if vulnerability:
+            return "Vulnerability"
+        explicit = alert_data.get("incident_type") or alert_data.get("type_of_incident")
+        if explicit:
+            value = str(explicit).strip()
+            if not ("," in value or "_" in value) and value.lower() not in {
+                "defender", "wazuh", "suricata", "office365", "office 365"
+            }:
+                return value
+        raw = " ".join([
+            str(explicit or ""),
+            str(alert_data.get("category") or ""),
+            str(alert_data.get("rule_group") or ""),
+            " ".join(str(item) for item in (doc.get("rule_groups") or [])),
+            source,
+        ]).lower()
+        categories = (
+            (r"\bsysmon\b|\bdefender\b", "Endpoint detection"),
+            (r"\boffice\s*365\b|\bthreatintelligence\b", "Email threat"),
+            (r"\bsuricata\b|\bnids\b", "Network intrusion"),
+            (r"\bguard\s*duty\b|\baws_guardduty\b", "Cloud threat"),
+            (r"\bgithub\b|\bsnyk\b", "Software supply chain"),
+            (r"\bwindows_system\b", "Windows security event"),
+        )
+        for pattern, name in categories:
+            if re.search(pattern, raw, re.IGNORECASE):
+                return name
+        fallback = str(alert_data.get("category") or alert_data.get("rule_group") or source).strip()
+        if "," in fallback:
+            fallback = fallback.split(",", 1)[0]
+        return fallback.replace("_", " ").strip().title() or "Unclassified"
+
+    @staticmethod
+    def _metric_minutes(doc: Dict[str, Any], kind: str) -> Any:
+        """Prefer Pallas's precise seconds over its analyst-facing rounded minutes."""
+        seconds = doc.get(f"{kind}_seconds")
+        try:
+            return float(seconds) / 60 if seconds not in (None, "") else doc.get(f"{kind}_minutes")
+        except (TypeError, ValueError):
+            return doc.get(f"{kind}_minutes")
 
     @classmethod
     def _to_issue(cls, doc: Dict[str, Any]) -> Dict[str, Any]:
         alert_data = doc.get("alert_data") if isinstance(doc.get("alert_data"), dict) else {}
         vulnerability = cls._is_vulnerability(doc)
         nids = cls._is_nids(doc)
-        source = cls._source(doc)
         raw_severity = str(doc.get("severity") or "").strip().upper() or "LOW"
         summary = (
             alert_data.get("summary")
@@ -571,17 +753,29 @@ class OpenSearchClient:
             or "Security alert"
         )
         summary = str(summary)
+        source = cls._source(doc, summary)
         if nids and not is_nids_summary(summary):
             summary = f"[{raw_severity}] [SURICATA] {summary}"
-        elif not re.match(r"^\s*\[", summary):
-            summary = f"[{raw_severity}] [{source}] {summary}"
+        elif not nids:
+            if source not in {"Wazuh", "Unknown"}:
+                summary = re.sub(
+                    r"^(\s*\[[^\]]+\]\s*)\[(?:Wazuh|Unknown|Local)\]",
+                    rf"\1[{source}]",
+                    summary,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+            if not re.match(r"^\s*\[", summary):
+                summary = f"[{raw_severity}] [{source}] {summary}"
 
-        resolved_at = doc.get("jira_resolved_at") or doc.get("closed_at")
         status_name = str(doc.get("jira_status") or doc.get("status") or "Open")
         status_category = str(doc.get("jira_status_category") or "")
         done = status_category.lower() == "done" or status_name.lower() in {
             "done", "closed", "resolved", "complete", "completed"
         }
+        resolved_at = doc.get("jira_resolved_at") or doc.get("closed_at")
+        if done and not resolved_at:
+            resolved_at = doc.get("jira_status_category_changed_at")
         if resolved_at:
             done = True
 
@@ -591,12 +785,7 @@ class OpenSearchClient:
             str(doc.get("resolution_notes") or ""),
         ])
         cves = sorted(_find_cves(full_text))
-        incident_type = (
-            alert_data.get("incident_type")
-            or alert_data.get("category")
-            or alert_data.get("rule_group")
-            or ("Vulnerability" if vulnerability else source)
-        )
+        incident_type = cls._incident_type(doc, alert_data, source, vulnerability)
         key = str(doc.get("jira_ticket_id") or "").strip()
         return {
             "key": key,
@@ -614,10 +803,10 @@ class OpenSearchClient:
                 "components": [{"name": source}],
                 "labels": [str(item) for item in (doc.get("rule_groups") or [])],
                 "source": source,
-                "mttd_minutes": doc.get("mttd_minutes"),
-                "mttt_minutes": doc.get("mttt_minutes"),
-                "mttr_minutes": doc.get("mttr_minutes"),
-                "mttc_minutes": doc.get("mttc_minutes"),
+                "mttd_minutes": cls._metric_minutes(doc, "mttd"),
+                "mttt_minutes": cls._metric_minutes(doc, "mttt"),
+                "mttr_minutes": cls._metric_minutes(doc, "mttr"),
+                "mttc_minutes": cls._metric_minutes(doc, "mttc"),
                 "event_timestamp": doc.get("event_timestamp"),
                 "alert_generated_at": doc.get("alert_generated_at") or doc.get("alert_timestamp"),
                 "first_response_at": doc.get("first_response_at"),
@@ -804,20 +993,24 @@ def lifecycle_seconds(fields: Dict[str, Any], duration_field: Optional[str],
     return sec if sec is not None and sec >= 0 else None
 
 
+def lifecycle_value_is_usable(kind: str, seconds: Optional[float]) -> bool:
+    """Reject Pallas's zero-MTTD fallback while retaining valid zeroes elsewhere."""
+    return seconds is not None and not (kind == "mttd" and seconds == 0)
+
+
 def fmt_duration(seconds: Optional[float]) -> str:
     if seconds is None:
         return "—"
-    seconds = int(round(seconds))
-    d, rem = divmod(seconds, 86400)
-    h, rem = divmod(rem, 3600)
-    m, _ = divmod(rem, 60)
+    if seconds < 60:
+        return "<1m"
+    total_minutes = int((seconds + 30) // 60)
+    d, rem = divmod(total_minutes, 1440)
+    h, m = divmod(rem, 60)
     if d:
         return f"{d}d {h}h"
     if h:
         return f"{h}h {m:02d}m"
-    if m:
-        return f"{m}m"
-    return "<1m"
+    return f"{m}m"
 
 
 def fmt_age(created: Optional[dt.datetime], now: dt.datetime) -> str:
@@ -918,10 +1111,12 @@ def auto_commentary(*, opened_n: int, closed_n: int, open_n: int, prev_open: Opt
         frac, label = cand[0]
         return label.split(" ≤")[0], round(frac * 100)
 
-    p1 = [f"We handled <b>{opened_n:,}</b> incident{'' if opened_n == 1 else 's'} this week and "
-          f"resolved <b>{closed_n:,}</b>"]
+    p1 = [
+        f"During the week, <b>{opened_n:,}</b> incident{'' if opened_n == 1 else 's'} opened "
+        f"and <b>{closed_n:,}</b> closed"
+    ]
     if open_n:
-        p1.append(f", closing the week with {open_n:,} still in active handling")
+        p1.append(f", leaving {open_n:,} open at the reporting cut-off")
         if prev_open is not None and open_n != prev_open:
             p1.append(f" (down from {prev_open:,} the week prior)" if open_n < prev_open
                       else f" (up from {prev_open:,} the week prior)")
@@ -941,7 +1136,7 @@ def auto_commentary(*, opened_n: int, closed_n: int, open_n: int, prev_open: Opt
     p2: List[str] = []
     if open_rows:
         top = open_rows[0]
-        p2.append(f"The most significant item still in handling is <b>{render.esc(top['ref'])}</b> — "
+        p2.append(f"The most significant item open at week end was <b>{render.esc(top['ref'])}</b> — "
                   f"{render.esc(top['summary'])} ({render.esc(top['sev'])}).")
     if type_breakdown:
         label, cnt = type_breakdown[0]
@@ -1047,7 +1242,7 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     open_n = incident_count(open_at(INC_TYPES, end))
     p_opened, p_closed, p_open = (incident_count(opened(INC_TYPES, p_start, p_end)),
                                   incident_count(closed(INC_TYPES, p_start, p_end)),
-                                  incident_count(open_at(INC_TYPES, p_start)))
+                                  incident_count(open_at(INC_TYPES, p_end)))
     log(
         "Executive incident counts done: "
         f"opened={opened_n} closed={closed_n} open={open_n} "
@@ -1071,13 +1266,23 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
         want = [f for f in [field_id, start_field, end_field] if f]
         issues = incident_search(jql, want, limit=2000)
         vals: List[float] = []
+        unusable_zero = 0
         for it in issues:
             f = it.get("fields", {})
             sec = lifecycle_seconds(f, field_id, start_field, end_field, args.duration_unit)
-            if sec is not None:
-                vals.append(sec)
+            # A zero MTTD in Pallas means the original vendor event timestamp
+            # was unavailable and alert_generated_at was used for both bounds.
+            # Reporting it as "<1m" would turn missing data into a performance claim.
+            if not lifecycle_value_is_usable(kind, sec):
+                if kind == "mttd" and sec == 0:
+                    unusable_zero += 1
+                continue
+            vals.append(sec)
         avg = sum(vals) / len(vals) if vals else None
-        log(f"Report build metric done: {kind} issue_count={len(issues)} usable_values={len(vals)} avg_seconds={avg}")
+        log(
+            f"Report build metric done: {kind} issue_count={len(issues)} "
+            f"usable_values={len(vals)} zero_fallback_values={unusable_zero} avg_seconds={avg}"
+        )
         return avg
 
     log("Report build phase: lifecycle metrics.")
@@ -1137,8 +1342,20 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     ]
     if src_field and src_field not in det_fields:
         det_fields.append(src_field)
-    open_issues = incident_search(
-        scoped(INC_TYPES, "statusCategory != Done", "resolution is EMPTY"), det_fields, limit=2000)
+    open_issues = incident_search(open_at(INC_TYPES, end), det_fields, limit=2000)
+    if isinstance(cli, OpenSearchClient):
+        status_counts: Dict[str, int] = {}
+        source_counts: Dict[str, int] = {}
+        for issue in open_issues:
+            fields = issue.get("fields", {})
+            status = str((fields.get("status") or {}).get("name") or "Unknown")
+            source = str(fields.get("source") or "Unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            source_counts[source] = source_counts.get(source, 0) + 1
+        debug(
+            "Open incident diagnostics: "
+            f"status_counts={status_counts} source_counts={source_counts}"
+        )
 
     def source_of(f: Dict[str, Any]) -> str:
         if args.source_field == "components":
@@ -1172,7 +1389,10 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
         SEV_ORDER.index(incident_label(it.get("fields", {})) or "Low"),
         parse_jira_dt(it.get("fields", {}).get("created")) or now,
     ))
+    open_detail_count = len(open_issues)
     open_issues = open_issues[:args.max_open_rows]
+    report_end_at = dt.datetime.combine(end, dt.time.min, tzinfo=dt.timezone.utc)
+    age_as_of = min(now, report_end_at)
     open_rows = []
     for it in open_issues:
         f = it.get("fields", {})
@@ -1184,10 +1404,13 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
             "sev": lbl, "sev_class": cls,
             "summary": f.get("summary", ""), "source": source_of(f),
             "opened": strip_leading_zero(created.strftime("%d %b %H:%M")) if created else "—",
-            "age": fmt_age(created, now), "assignee": assignee_of(f),
+            "age": fmt_age(created, age_as_of), "assignee": assignee_of(f),
             "status": (f.get("status") or {}).get("name", ""),
         })
-    log(f"Open incident detail done: issue_count={len(open_issues)} row_count={len(open_rows)}")
+    log(
+        "Open incident detail done: "
+        f"week_end_count={open_detail_count} row_count={len(open_rows)} as_of={end.isoformat()}"
+    )
 
     # ---- closed selected ----
     log("Report build phase: closed incident detail.")
@@ -1283,6 +1506,19 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     v_resolved = cli.count(closed(VULN_TYPE, start, end))
     v_new = cli.count(opened(VULN_TYPE, start, end))
     v_resolved_prev = cli.count(closed(VULN_TYPE, p_start, p_end))
+    if isinstance(cli, OpenSearchClient):
+        new_vuln_sources: Dict[str, int] = {}
+        new_vuln_types: Dict[str, int] = {}
+        for issue in cli.search(opened(VULN_TYPE, start, end), ["source", "incident_type"], limit=5000):
+            fields = issue.get("fields", {})
+            source = str(fields.get("source") or "Unknown")
+            incident_type = str(fields.get("incident_type") or "Unknown")
+            new_vuln_sources[source] = new_vuln_sources.get(source, 0) + 1
+            new_vuln_types[incident_type] = new_vuln_types.get(incident_type, 0) + 1
+        debug(
+            "Vulnerability new diagnostics: "
+            f"source_counts={new_vuln_sources} type_counts={new_vuln_types}"
+        )
     log(
         "Vulnerability counts done: "
         f"severity={vuln_sev} total_open={total_open} resolved={v_resolved} "
@@ -1357,7 +1593,10 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
             "opened": opened_n, "opened_delta": delta_html(opened_n, p_opened, favorable=None),
             "closed": closed_n, "closed_delta": delta_html(closed_n, p_closed, favorable="up"),
             "open": open_n, "open_delta": delta_html(open_n, p_open, favorable="down"),
-            "mttd": fmt_duration(mttd), "mttd_delta": _dur_delta(mttd, p_mttd),
+            "mttd": fmt_duration(mttd),
+            "mttd_delta": (
+                "source event time unavailable" if mttd is None else _dur_delta(mttd, p_mttd)
+            ),
             "mttt": fmt_duration(mttt), "mttt_delta": _dur_delta(mttt, p_mttt),
             "mttr": fmt_duration(mttr), "mttr_delta": _dur_delta(mttr, p_mttr),
             "mttc": fmt_duration(mttc), "mttc_delta": _dur_delta(mttc, p_mttc),
@@ -1368,16 +1607,24 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
         "inc_severity": inc_sev, "inc_total_opened": opened_n,
         "type_breakdown": type_breakdown, "sla": sla,
         "trend": trend, "sev_trend": sev_trend, "sev_trend_labels": inc_labels,
-        "inc_summary_line": f"We closed <b>{closed_n:,} of {opened_n:,}</b> items raised this week — ending the week with {open_n:,} open, all in active handling below." if opened_n else "",
-        "open_rows": open_rows, "closed_count": closed_n, "closed_rows": closed_rows,
+        "inc_src": "Athena Pallas · Jira-synced Security Alert + Security Incident",
+        "inc_summary_line": (
+            f"During the week, <b>{opened_n:,}</b> incidents opened and <b>{closed_n:,}</b> closed. "
+            f"At the reporting cut-off, <b>{open_n:,}</b> remained open."
+            if opened_n or closed_n else ""
+        ),
+        "open_count": open_n, "open_rows": open_rows,
+        "open_more": max(open_detail_count - len(open_rows), 0),
+        "closed_count": closed_n, "closed_rows": closed_rows,
         "closed_more": max(closed_n - len(closed_rows), 0),
         "vuln": {
             "crit_open": counts_by_label.get("Critical", 0), "high_open": counts_by_label.get("High", 0),
-            "high_note": "", "resolved": v_resolved,
+            "critical_note": "", "high_note": "", "resolved": v_resolved,
             "resolved_delta": delta_html(v_resolved, v_resolved_prev, favorable="up"),
             "new": v_new, "net": v_new - v_resolved, "severity": vuln_sev,
             "total_open": total_open, "top_crit": top_crit, "top_high": top_high, "sla": vuln_sla, "note": "",
         },
+        "vuln_src": "Athena Pallas · Jira-synced vulnerabilities",
         "_sections_enabled": section_enablement(),
     }
     # supplemental (device / endpoint / availability)
@@ -1464,7 +1711,7 @@ def sample_data() -> Dict[str, Any]:
             "detection rules to cut the noise and cleared five items carried over from last week.</p>"
             "<p>The one item worth your attention: <b>NSO-4821</b>, outbound C2 beaconing blocked at the WAF. "
             "The affected host (LAP-014) is isolated and under review; no data movement was observed. "
-            "We resolved 66 of 72 incidents inside SLA and closed the week with 6 open, all in active handling.</p>"
+            "During the week, 72 incidents opened and 66 closed; 6 remained open at the reporting cut-off.</p>"
         ),
         "inc_severity": [("Critical", 8), ("High", 27), ("Medium", 37)],
         "inc_total_opened": 72,
@@ -1493,7 +1740,9 @@ def sample_data() -> Dict[str, Any]:
             {"label": "W-1", "Critical": 7, "High": 22, "Medium": 29},
             {"label": "This wk", "Critical": 8, "High": 27, "Medium": 37},
         ],
-        "inc_summary_line": "We closed <b>66 of 72</b> items raised this week and cleared 5 from prior backlog — ending the week with 6 open, all in active handling below.",
+        "inc_src": "Athena Pallas · Jira-synced Security Alert + Security Incident",
+        "inc_summary_line": "During the week, <b>72</b> incidents opened and <b>66</b> closed. At the reporting cut-off, <b>6</b> remained open.",
+        "open_count": 6,
         "open_rows": [
             {"ref": "NSO-4821", "type": "Incident", "sev": "Critical", "sev_class": "crit", "summary": "Outbound C2 beaconing blocked at WAF (185.220.101.44)", "source": "NIDS", "opened": "4 Jul 09:12", "age": "1d 4h", "assignee": "Shelly Peralta", "status": "Work in progress"},
             {"ref": "NSO-4835", "type": "Alert", "sev": "High", "sev_class": "high", "summary": "Repeated failed admin sign-ins — Microsoft 365", "source": "Office 365", "opened": "4 Jul 22:40", "age": "14h", "assignee": "Shelly Peralta", "status": "Pending"},
@@ -1524,7 +1773,8 @@ def sample_data() -> Dict[str, Any]:
                                  ["dev-nrm-01", "Ubuntu 22.04", "4 Jul 18:25 UTC", "38h"]],
         },
         "vuln": {
-            "crit_open": 4, "high_open": 31, "high_note": "across 12 assets", "resolved": 47,
+            "crit_open": 4, "high_open": 31, "critical_note": "across the estate",
+            "high_note": "across 12 assets", "resolved": 47,
             "resolved_delta": '<b class="up">▲ 12</b> vs last week', "new": 22, "net": -25,
             "severity": [("Critical", 4), ("High", 31), ("Medium", 96), ("Low", 140)], "total_open": 271,
             "sla": {
@@ -1538,8 +1788,9 @@ def sample_data() -> Dict[str, Any]:
             "top_high": [("CVE-2026-43701", "#", 8), ("CVE-2026-43715", "#", 8),
                          ("CVE-2025-47273", "#", 5), ("CVE-2024-6345", "#", 5),
                          ("CVE-2026-43722", "#", 4), ("CVE-2025-51904", "#", 3)],
-            "note": "The 4 critical findings are all patchable and scheduled this week; the OpenSSL cluster on SRV-DB-02 is prioritized via NSO-4851.",
+            "note": "The OpenSSL cluster on SRV-DB-02 is prioritized via NSO-4851.",
         },
+        "vuln_src": "Athena Pallas · Jira-synced vulnerabilities",
         "availability": {"uptime": "99.98%", "sla": "99.9%", "outages": 0, "outages_note": "none recorded",
                           "maintenance": 1, "maint_note": "8 min · off-hours", "monitoring": "24 / 7"},
     }

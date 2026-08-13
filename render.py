@@ -289,7 +289,7 @@ def _commentary(d: Dict[str, Any]) -> str:
     )
 
 
-def _inc_open_rows(rows: Sequence[Dict[str, Any]]) -> str:
+def _inc_open_rows(rows: Sequence[Dict[str, Any]], more: int = 0) -> str:
     out = []
     for r in rows:
         ref = f'<a class="id" href="{esc(r.get("ref_url", "#"))}">{esc(r["ref"])}</a>' if r.get("ref_url") else f'<span class="id">{esc(r["ref"])}</span>'
@@ -305,6 +305,11 @@ def _inc_open_rows(rows: Sequence[Dict[str, Any]]) -> str:
             f'<td class="owner">{esc(r.get("assignee") or "Unassigned")}</td>'
             f"<td>{esc(r['status'])}</td>"
             "</tr>"
+        )
+    if more > 0:
+        out.append(
+            f'<tr><td colspan="9" class="subtle" style="text-align:center;">'
+            f'+ {more:,} further items were open at week end — full log available on request</td></tr>'
         )
     return "".join(out)
 
@@ -335,7 +340,7 @@ def _table_cols(widths: Sequence[int]) -> str:
 
 def _incidents(d: Dict[str, Any], n: int = 2) -> str:
     sev_rows = [(lbl, val, SEV_CLASS[lbl]) for lbl, val in d["inc_severity"]]
-    open_rows = _inc_open_rows(d["open_rows"])
+    open_rows = _inc_open_rows(d["open_rows"], d.get("open_more", 0))
     closed_rows = _inc_closed_rows(d["closed_rows"], d.get("closed_more", 0))
     status_series = [("opened", "var(--s-opened)"), ("closed", "var(--s-closed)"), ("open", "var(--s-open)")]
     status_legend = _legend([("Opened", "var(--s-opened)"), ("Closed", "var(--s-closed)"), ("Open at week end", "var(--s-open)")])
@@ -378,7 +383,7 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
     if sla_card:
         extra += f'<div style="margin-top:16px;">{sla_card}</div>'
     return (
-        "<section>" + _sec_head(f"{n:02d} · Detection & response", "Incident management", d.get("inc_src", "Jira SECOPS · Security Alert + Security Incident")) +
+        "<section>" + _sec_head(f"{n:02d} · Detection & response", "Incident management", d.get("inc_src", "Athena Pallas · Jira-synced incidents")) +
         '<div class="grid2">'
         '<div class="card"><p class="card-h">Opened by severity</p>'
         f'<p class="caption" style="margin:2px 0 6px;">This week · {sum(val for _, val in d["inc_severity"]):,} shown</p>'
@@ -388,12 +393,12 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
         + status_legend + f'<div class="chart-fill">{lines_svg(d["trend"], status_series, "Opened, closed and open per week")}</div></div></div>'
         + sev_card + extra +
         f'<p class="caption">{d.get("inc_summary_line", "")}</p>'
-        f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Open — currently in handling ({len(d["open_rows"])})</h3>'
+        f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Open at week end ({d.get("open_count", len(d["open_rows"])):,})</h3>'
         '<div class="tbl-wrap"><table class="incident-table"><colgroup>'
         '<col style="width:8%"><col style="width:9%"><col style="width:11%"><col style="width:25%">'
         '<col style="width:10%"><col style="width:9%"><col style="width:6%"><col style="width:12%"><col style="width:10%">'
         '</colgroup><thead><tr>'
-        "<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th>Opened</th><th>Age</th><th>Assignee</th><th>Status</th>"
+        "<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th>Opened</th><th>Age</th><th>Assignee</th><th>Current status</th>"
         f"</tr></thead><tbody>{open_rows}</tbody></table></div>"
         f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Closed this week ({d["closed_count"]:,}) — selected</h3>'
         '<div class="tbl-wrap"><table class="incident-table">'
@@ -461,10 +466,13 @@ def _endpoint(d: Dict[str, Any], n: int = 4) -> str:
 
 def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     v = d.get("vuln")
-    head = _sec_head(f"{n:02d} · Exposure", "Vulnerability status", "Athena scanning · Jira SECOPS · Vulnerability")
+    head = _sec_head(
+        f"{n:02d} · Exposure", "Vulnerability status",
+        d.get("vuln_src", "Athena Pallas · Jira-synced vulnerabilities"),
+    )
     if not v:
         return "<section>" + head + _pending("Athena scanning") + "</section>"
-    crit_cap = "none open" if v["crit_open"] == 0 else "all patchable"
+    crit_cap = v.get("critical_note") or ("none open" if v["crit_open"] == 0 else "across the estate")
     high_cap = v.get("high_note") or ("none open" if v["high_open"] == 0 else "across the estate")
     tiles = (
         _tile("red", "Critical open", f'{v["crit_open"]:,}', crit_cap) +

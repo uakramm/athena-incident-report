@@ -407,13 +407,15 @@ def _legend(items: Sequence[Tuple[str, str]]) -> str:
     return f'<div style="padding:2px 0 8px;">{spans}</div>'
 
 
-def _incident_table(rows: Sequence[Dict[str, Any]], closed: bool, more: int = 0) -> str:
+def _incident_table(
+    rows: Sequence[Dict[str, Any]], closed: bool, more: int = 0, *, more_label: str = ""
+) -> str:
     if closed:
         heads = ["Ref", "Type", "Severity", "Summary", "Source", "Assignee", "Time to close"]
         aligns = ["left", "left", "left", "left", "left", "left", "right"]
         widths = [8, 9, 11, 34, 11, 14, 13]
     else:
-        heads = ["Ref", "Type", "Severity", "Summary", "Source", "Opened", "Age", "Assignee", "Status"]
+        heads = ["Ref", "Type", "Severity", "Summary", "Source", "Opened", "Age", "Assignee", "Current status"]
         aligns = ["left"] * 9
         widths = [8, 9, 11, 25, 10, 9, 6, 12, 10]
     th = "".join(
@@ -446,9 +448,10 @@ def _incident_table(rows: Sequence[Dict[str, Any]], closed: bool, more: int = 0)
         )
         body.append(f"<tr>{tds}</tr>")
     if more > 0:
+        label = more_label or "further items resolved this week"
         body.append(
             f'<tr><td colspan="{len(heads)}" align="center" style="{FONT}font-size:12px;color:{MUTED};'
-            f'padding:9px 10px;">+ {more:,} further items resolved this week — full log available on request</td></tr>'
+            f'padding:9px 10px;">+ {more:,} {esc(label)} — full log available on request</td></tr>'
         )
     return (
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAPER}" '
@@ -463,7 +466,7 @@ def _sub_head(text: str) -> str:
 
 def _incidents(d: Dict[str, Any], n: int = 2) -> str:
     parts = [_sec_head(f"{n:02d} · Detection & response", "Incident management",
-                       d.get("inc_src", "Jira SECOPS · Security Alert + Security Incident"))]
+                       d.get("inc_src", "Athena Pallas · Jira-synced incidents"))]
 
     sev_rows = [(lbl, val, SEV_FILL[lbl]) for lbl, val in d["inc_severity"]]
     sev_body = _chart_img(d, "inc_severity", "Incidents opened by severity") or _bar_rows(sev_rows)
@@ -533,8 +536,11 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
     if d.get("inc_summary_line"):
         parts.append(f'<div style="{FONT}font-size:12px;color:{MUTED};padding:14px 2px 0;">{_inline(d["inc_summary_line"])}</div>')
 
-    parts.append(_sub_head(f'Open — currently in handling ({len(d["open_rows"])})'))
-    parts.append(_incident_table(d["open_rows"], closed=False))
+    parts.append(_sub_head(f'Open at week end ({d.get("open_count", len(d["open_rows"])):,})'))
+    parts.append(_incident_table(
+        d["open_rows"], closed=False, more=d.get("open_more", 0),
+        more_label="further items were open at week end",
+    ))
     parts.append(_sub_head(f'Closed this week ({d["closed_count"]:,}) — selected'))
     parts.append(_incident_table(d["closed_rows"], closed=True, more=d.get("closed_more", 0)))
     return "".join(parts)
@@ -600,10 +606,13 @@ def _endpoint(d: Dict[str, Any], n: int = 4) -> str:
 
 def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     v = d.get("vuln")
-    head = _sec_head(f"{n:02d} · Exposure", "Vulnerability status", "Athena scanning · Jira SECOPS · Vulnerability")
+    head = _sec_head(
+        f"{n:02d} · Exposure", "Vulnerability status",
+        d.get("vuln_src", "Athena Pallas · Jira-synced vulnerabilities"),
+    )
     if not v:
         return head + _pending("Athena scanning")
-    crit_cap = "none open" if v["crit_open"] == 0 else "all patchable"
+    crit_cap = v.get("critical_note") or ("none open" if v["crit_open"] == 0 else "across the estate")
     high_cap = v.get("high_note") or ("none open" if v["high_open"] == 0 else "across the estate")
     tiles = [
         _tile("red", "Critical open", f'{v["crit_open"]:,}', crit_cap),

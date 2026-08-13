@@ -1,6 +1,7 @@
 import os
 import unittest
 from unittest import mock
+import datetime as dt
 
 import generate_report
 
@@ -66,6 +67,16 @@ class LifecycleMetricTests(unittest.TestCase):
         }
         self.assertIsNone(generate_report.lifecycle_seconds(fields, None, "start", "end"))
 
+    def test_zero_mttd_fallback_is_not_reportable(self) -> None:
+        self.assertFalse(generate_report.lifecycle_value_is_usable("mttd", 0))
+        self.assertTrue(generate_report.lifecycle_value_is_usable("mttt", 0))
+        self.assertTrue(generate_report.lifecycle_value_is_usable("mttd", 0.2))
+
+    def test_duration_display_rounds_to_nearest_minute(self) -> None:
+        self.assertEqual(generate_report.fmt_duration(59), "<1m")
+        self.assertEqual(generate_report.fmt_duration(103), "2m")
+        self.assertEqual(generate_report.fmt_duration(3860), "1h 04m")
+
 
 class OpenSearchClientTests(unittest.TestCase):
     def _client(self, documents):
@@ -104,6 +115,20 @@ class OpenSearchClientTests(unittest.TestCase):
         self.assertEqual(issue["fields"]["status"]["statusCategory"]["name"], "In Progress")
         self.assertEqual(issue["fields"]["assignee"]["displayName"], "Shelly Peralta")
 
+    def test_precise_lifecycle_seconds_override_rounded_minutes(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "NSO-1001",
+            "jira_created_at": "2026-07-13T12:00:00Z",
+            "severity": "high",
+            "mttd_seconds": 0.24,
+            "mttd_minutes": 0,
+            "mttt_seconds": 90,
+            "mttt_minutes": 1.5,
+        }])
+        issue = client.search('issuetype in ("Security Alert", "Security Incident")', [])[0]
+        self.assertAlmostEqual(issue["fields"]["mttd_minutes"], 0.004)
+        self.assertEqual(issue["fields"]["mttt_minutes"], 1.5)
+
     def test_suricata_critical_uses_nids_sev_2(self) -> None:
         client = self._client([{
             "jira_ticket_id": "NSO-928",
@@ -116,6 +141,134 @@ class OpenSearchClientTests(unittest.TestCase):
         issue = client.search('issuetype in ("Security Alert", "Security Incident")', [])[0]
         self.assertEqual(issue["fields"]["severity"]["value"], "Sev-2")
         self.assertIn("[SURICATA]", issue["fields"]["summary"])
+
+    def test_cve_mention_does_not_turn_an_incident_into_a_vulnerability(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "SECOPS-1",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "severity": "high",
+            "alert_source": "wazuh",
+            "rule_groups": ["sysmon", "windows"],
+            "rule_description": "Exploit attempt involving CVE-2026-12345",
+        }])
+        issues = client.search('issuetype in ("Security Alert", "Security Incident")', [])
+        self.assertEqual([issue["key"] for issue in issues], ["SECOPS-1"])
+        self.assertEqual(issues[0]["fields"]["issuetype"]["name"], "Security Alert")
+
+    def test_explicit_vulnerability_detector_group_is_a_vulnerability(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "SECOPS-2",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "severity": "critical",
+            "alert_source": "wazuh",
+            "rule_groups": ["vulnerability-detector"],
+            "rule_description": "CVE-2026-12345 affects linux-aws",
+        }])
+        issues = client.search("issuetype = Vulnerability", [])
+        self.assertEqual([issue["key"] for issue in issues], ["SECOPS-2"])
+
+    def test_structured_vulnerability_context_alone_does_not_override_jira_routing(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "SECOPS-3",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "severity": "high",
+            "alert_source": "defender",
+            "rule_groups": ["vulnerability-detector"],
+            "alert_data": {
+                "source": "wazuh",
+                "description": "CVE-2026-12345 affects Windows Defender",
+                "data": {"vulnerability": {"cve": "CVE-2026-12345"}},
+            },
+        }])
+        self.assertEqual(client.count("issuetype = Vulnerability"), 0)
+        self.assertEqual(
+            client.count('issuetype in ("Security Alert", "Security Incident")'), 1
+        )
+
+    def test_legacy_cve_affects_rule_is_a_vulnerability(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "SECOPS-31",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "severity": "high",
+            "alert_source": "wazuh",
+            "rule_description": "CVE-2026-12345 affects linux-aws",
+        }])
+        self.assertEqual(client.count("issuetype = Vulnerability"), 1)
+
+    def test_github_security_finding_is_a_vulnerability(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "SECOPS-32",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "severity": "high",
+            "alert_source": "github",
+            "alert_data": {"source": "wazuh"},
+            "rule_description": "Repository security advisory GHSA-1234",
+        }])
+        self.assertEqual(client.count("issuetype = Vulnerability"), 1)
+
+    def test_generic_wazuh_source_is_replaced_with_detected_vendor(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "SECOPS-4",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "severity": "high",
+            "alert_source": "wazuh",
+            "rule_description": "AWS GuardDuty High anomalous API activity",
+        }, {
+            "jira_ticket_id": "SECOPS-5",
+            "jira_created_at": "2026-08-03T10:01:00Z",
+            "severity": "high",
+            "alert_source": "wazuh",
+            "rule_description": "Office 365 phishing and malware event",
+        }])
+        issues = client.search('issuetype in ("Security Alert", "Security Incident")', [])
+        self.assertEqual(
+            [issue["fields"]["source"] for issue in issues],
+            ["GuardDuty", "Office 365"],
+        )
+        self.assertIn("[GuardDuty]", issues[0]["fields"]["summary"])
+        self.assertIn("[Office 365]", issues[1]["fields"]["summary"])
+
+    def test_internal_rule_groups_are_mapped_to_readable_incident_types(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "SECOPS-6",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "severity": "high",
+            "alert_source": "wazuh",
+            "alert_data": {"category": "sysmon, sysmon_eid11_detections, windows"},
+        }])
+        issue = client.search('issuetype in ("Security Alert", "Security Incident")', [])[0]
+        self.assertEqual(issue["fields"]["incident_type"], "Endpoint detection")
+
+    def test_defender_vendor_label_maps_to_endpoint_detection(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "SECOPS-61",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "severity": "high",
+            "alert_source": "defender",
+            "alert_data": {"incident_type": "Defender"},
+        }])
+        issue = client.search('issuetype in ("Security Alert", "Security Incident")', [])[0]
+        self.assertEqual(issue["fields"]["incident_type"], "Endpoint detection")
+
+    def test_duplicate_mirrors_use_the_freshest_jira_state(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "SECOPS-7",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "jira_updated_at": "2026-08-03T11:00:00Z",
+            "jira_status": "Open",
+            "severity": "high",
+        }, {
+            "jira_ticket_id": "SECOPS-7",
+            "jira_created_at": "2026-08-03T10:00:00Z",
+            "jira_updated_at": "2026-08-03T12:00:00Z",
+            "jira_status": "Closed",
+            "jira_status_category": "Done",
+            "jira_resolved_at": "2026-08-03T11:59:00Z",
+            "severity": "high",
+        }])
+        issues = client.search('issuetype in ("Security Alert", "Security Incident")', [])
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["fields"]["status"]["statusCategory"]["name"], "Done")
 
     def test_open_at_excludes_ticket_resolved_before_boundary(self) -> None:
         client = self._client([
@@ -137,6 +290,39 @@ class OpenSearchClientTests(unittest.TestCase):
             [],
         )
         self.assertEqual([issue["key"] for issue in issues], ["NSO-2"])
+
+    def test_open_at_historical_boundary_includes_later_resolution(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "NSO-3",
+            "jira_created_at": "2026-07-01T00:00:00Z",
+            "jira_resolved_at": "2026-07-15T00:00:00Z",
+            "severity": "high",
+        }])
+        prior_week_end = dt.date(2026, 7, 13)
+        issues = client.search(
+            'issuetype in ("Security Alert", "Security Incident") '
+            f'AND created < "{prior_week_end}" '
+            f'AND (resolutiondate is EMPTY OR resolutiondate >= "{prior_week_end}")',
+            [],
+        )
+        self.assertEqual([issue["key"] for issue in issues], ["NSO-3"])
+
+    def test_done_ticket_uses_status_change_as_resolution_fallback(self) -> None:
+        client = self._client([{
+            "jira_ticket_id": "NSO-4",
+            "jira_created_at": "2026-07-01T00:00:00Z",
+            "jira_status": "Canceled",
+            "jira_status_category": "Done",
+            "jira_status_category_changed_at": "2026-07-10T00:00:00Z",
+            "severity": "high",
+        }])
+        issues = client.search(
+            'issuetype in ("Security Alert", "Security Incident") '
+            'AND created < "2026-07-20" '
+            'AND (resolutiondate is EMPTY OR resolutiondate >= "2026-07-20")',
+            [],
+        )
+        self.assertEqual(issues, [])
 
     def test_from_env_requires_password(self) -> None:
         with mock.patch.dict(os.environ, {
