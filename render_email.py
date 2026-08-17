@@ -179,8 +179,15 @@ def _two_col_cards(cells: Sequence[Tuple[str, str, str]], top: int = 16) -> str:
     )
 
 
-def _sec_head(eyebrow: str, title: str, src: str) -> str:
-    right = (f'<td align="right" style="{FONT}font-size:11px;color:{MUTED};vertical-align:bottom;">{esc(src)}</td>'
+def _sec_head(
+    eyebrow: str, title: str, src: str, href: str = "", link_label: str = "",
+) -> str:
+    link = (
+        f'<div style="padding-top:4px;"><a href="{esc(href)}" '
+        f'style="color:{LINK};font-weight:bold;text-decoration:none;">{esc(link_label)} &rarr;</a></div>'
+        if href and link_label else ""
+    )
+    right = (f'<td align="right" style="{FONT}font-size:11px;color:{MUTED};vertical-align:bottom;">{esc(src)}{link}</td>'
              if src else "<td></td>")
     return (
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
@@ -192,16 +199,33 @@ def _sec_head(eyebrow: str, title: str, src: str) -> str:
     )
 
 
-def _tile(kind: str, label: str, num: str, delta_html: str, small: bool = False) -> str:
+def _link_cta(href: str, label: str = "View in Jira") -> str:
+    if not href:
+        return ""
+    return (
+        f'<div style="{FONT}font-size:11.5px;font-weight:bold;padding-top:8px;">'
+        f'<a href="{esc(href)}" style="color:{LINK};text-decoration:none;">{esc(label)} &rarr;</a></div>'
+    )
+
+
+def _tile(
+    kind: str, label: str, num: str, delta_html: str, small: bool = False,
+    href: str = "", link_label: str = "View in Jira", show_cta: bool = True,
+) -> str:
     """Returns the tile card (no outer <td>); _tile_grid places it in a sized cell."""
     bg, bd, ink = TILE.get(kind, TILE[""])
     num_size = 22 if small else 28
+    number = (
+        f'<a href="{esc(href)}" style="color:{ink};text-decoration:none;">{esc(num)}</a>'
+        if href else esc(num)
+    )
     return (
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" height="100%">'
         f'<tr><td bgcolor="{bg}" valign="top" style="border:1px solid {bd};border-radius:12px;padding:14px 15px;box-shadow:{SHADOW};">'
         f'<div style="{FONT}font-size:10.5px;letter-spacing:0.05em;text-transform:uppercase;font-weight:700;color:{MUTED};">{esc(label)}</div>'
-        f'<div style="{FONT}font-size:{num_size}px;line-height:1;font-weight:750;color:{ink};padding-top:5px;">{esc(num)}</div>'
+        f'<div style="{FONT}font-size:{num_size}px;line-height:1;font-weight:750;color:{ink};padding-top:5px;">{number}</div>'
         f'<div style="{FONT}font-size:11.5px;color:{MUTED};padding-top:7px;">{_inline(delta_html)}</div>'
+        f'{_link_cta(href, link_label) if show_cta else ""}'
         f'</td></tr></table>'
     )
 
@@ -365,15 +389,16 @@ def _band(d: Dict[str, Any]) -> str:
 
 def _exec(d: Dict[str, Any], n: int = 1) -> str:
     e = d["exec"]
+    links = e.get("links", {})
     tiles = [
-        _tile("blue", "Incidents opened", f'{e["opened"]:,}', e["opened_delta"]),
-        _tile("green", "Incidents closed", f'{e["closed"]:,}', e["closed_delta"]),
-        _tile("red", "Open at week end", f'{e["open"]:,}', e["open_delta"]),
+        _tile("blue", "Incidents opened", f'{e["opened"]:,}', e["opened_delta"], href=links.get("opened", "")),
+        _tile("green", "Incidents closed", f'{e["closed"]:,}', e["closed_delta"], href=links.get("closed", "")),
+        _tile("red", "Open at week end", f'{e["open"]:,}', e["open_delta"], href=links.get("open", "")),
         _tile("green", "System availability", e["uptime"], e["uptime_note"], small=True),
-        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True),
-        _tile("", "Mean time to ticket", e["mttt"], e["mttt_delta"], small=True),
-        _tile("", "Mean time to respond", e["mttr"], e["mttr_delta"], small=True),
-        _tile("", "Mean time to close", e["mttc"], e["mttc_delta"], small=True),
+        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True, href=links.get("lifecycle_opened", ""), show_cta=False),
+        _tile("", "Mean time to ticket", e["mttt"], e["mttt_delta"], small=True, href=links.get("lifecycle_opened", ""), show_cta=False),
+        _tile("", "Mean time to respond", e["mttr"], e["mttr_delta"], small=True, href=links.get("lifecycle_opened", ""), show_cta=False),
+        _tile("", "Mean time to close", e["mttc"], e["mttc_delta"], small=True, href=links.get("lifecycle_closed", ""), show_cta=False),
     ]
     return (
         _sec_head(f"{n:02d} · This week at a glance", "Executive summary", "")
@@ -465,11 +490,16 @@ def _sub_head(text: str) -> str:
 
 
 def _incidents(d: Dict[str, Any], n: int = 2) -> str:
-    parts = [_sec_head(f"{n:02d} · Detection & response", "Incident management",
-                       d.get("inc_src", "Athena Pallas · Jira-synced incidents"))]
+    links = d.get("inc_links", {})
+    parts = [_sec_head(
+        f"{n:02d} · Detection & response", "Incident management",
+        d.get("inc_src", "Athena Pallas · Jira-synced incidents"),
+        links.get("opened", ""), "View incidents in Jira",
+    )]
 
     sev_rows = [(lbl, val, SEV_FILL[lbl]) for lbl, val in d["inc_severity"]]
     sev_body = _chart_img(d, "inc_severity", "Incidents opened by severity") or _bar_rows(sev_rows)
+    sev_body += _link_cta(links.get("severity", ""), "Open in Jira")
     sev_caption = f'This week &middot; {sum(v for _, v in d["inc_severity"]):,} shown'
 
     # 6-week trend (line chart on web) → numeric table
@@ -519,7 +549,8 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
     if d.get("type_breakdown"):
         type_rows = [(lbl, val, BRAND) for lbl, val in d["type_breakdown"]]
         type_body = _chart_img(d, "inc_type", "Incidents by type") or _bar_rows(type_rows)
-        parts.append(_card("Incidents by type", "Opened this week, by classification", type_body, top=16))
+        parts.append(_card("Incidents by type", "Opened this week, by classification",
+                           type_body, top=16))
 
     sla = d.get("sla")
     if sla and sla.get("rows"):
@@ -534,15 +565,10 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
                            body, top=16))
 
     if d.get("inc_summary_line"):
-        parts.append(f'<div style="{FONT}font-size:12px;color:{MUTED};padding:14px 2px 0;">{_inline(d["inc_summary_line"])}</div>')
-
-    parts.append(_sub_head(f'Open at week end ({d.get("open_count", len(d["open_rows"])):,})'))
-    parts.append(_incident_table(
-        d["open_rows"], closed=False, more=d.get("open_more", 0),
-        more_label="further items were open at week end",
-    ))
-    parts.append(_sub_head(f'Closed this week ({d["closed_count"]:,}) — selected'))
-    parts.append(_incident_table(d["closed_rows"], closed=True, more=d.get("closed_more", 0)))
+        parts.append(
+            f'<div style="{FONT}font-size:12px;color:{MUTED};padding:14px 2px 0;">'
+            f'{_inline(d["inc_summary_line"])}</div>'
+        )
     return "".join(parts)
 
 
@@ -604,6 +630,75 @@ def _endpoint(d: Dict[str, Any], n: int = 4) -> str:
     return head + _tile_grid(tiles, 4) + _card("Protection coverage", "", _meter_rows(ep.get("meters", [])), top=12)
 
 
+def _agent_status(d: Dict[str, Any], n: int = 5) -> str:
+    agent = d.get("agent_status") or {}
+    head = _sec_head(f"{n:02d} · Agent health", "Agent status", "Wazuh agent heartbeat snapshot")
+    if agent.get("unavailable") or not agent:
+        return head + _card("Agent heartbeat data unavailable", "", "This data was unavailable for this report run.")
+
+    total = int(agent.get("total", 0) or 0)
+    active = int(agent.get("active", 0) or 0)
+    inactive = int(agent.get("inactive", 0) or 0)
+    dashboard = str(agent.get("dashboard_url") or "")
+    tiles = [
+        _tile("blue", "Agents in scope", f"{total:,}", "seen within the last 14 days", href=dashboard, link_label="View agents"),
+        _tile("green", "Active agents", f"{active:,}", "heartbeat within 24h", href=dashboard, link_label="View agents"),
+        _tile("amber", "Inactive agents", f"{inactive:,}", "no heartbeat for more than 24h", href=dashboard, link_label="View agents"),
+        _tile("red", "Inactive 7-14 days", f'{int(agent.get("inactive_7_14d", 0) or 0):,}', "oldest included status group", href=dashboard, link_label="View agents"),
+    ]
+    pct = 0 if total == 0 else active / total * 100
+    meters = [
+        ["Active within 24h", active, total, _stat_cls(pct)],
+        ["Inactive 24-72h", int(agent.get("inactive_24_72", 0) or 0), total, "warn"],
+        ["Inactive 3-7d", int(agent.get("inactive_3_7d", 0) or 0), total, "bad"],
+        ["Inactive 7-14d", int(agent.get("inactive_7_14d", 0) or 0), total, "bad"],
+    ]
+    body = (
+        f'<div style="{FONT}font-size:12px;color:{MUTED};padding-bottom:8px;">Active means the agent reported '
+        "within 24 hours. Agents last seen more than 14 days ago are excluded.</div>"
+        + _meter_rows(meters) + _link_cta(dashboard, "View agent details")
+    )
+    parts = [head, _tile_grid(tiles, 4), _card("Heartbeat status", "", body, top=12)]
+
+    rows = []
+    for item in agent.get("inactive_agents", []):
+        name = esc(item.get("name") or "Unknown")
+        if dashboard:
+            name = f'<a href="{esc(dashboard)}" style="color:{LINK};text-decoration:none;font-weight:bold;">{name}</a>'
+        cells = [
+            name, esc(item.get("id") or "-"), esc(item.get("os") or "Unknown"),
+            esc(item.get("last_seen") or "-"), esc(item.get("inactive") or "-"),
+            esc(item.get("category") or "Inactive"),
+        ]
+        widths = [18, 8, 22, 20, 12, 20]
+        rows.append("<tr>" + "".join(
+            f'<td width="{width}%" valign="top" style="{FONT}font-size:11px;color:{INK2};padding:8px 7px;'
+            f'border-bottom:1px solid {LINE};overflow-wrap:anywhere;">{cell}</td>'
+            for cell, width in zip(cells, widths)
+        ) + "</tr>")
+    if rows:
+        headers = ["Agent", "ID", "Host OS", "Last seen", "Inactive", "Status group"]
+        widths = [18, 8, 22, 20, 12, 20]
+        th = "".join(
+            f'<td width="{width}%" style="{FONT}font-size:9px;text-transform:uppercase;color:{MUTED};'
+            f'font-weight:bold;padding:8px 7px;background:{PANEL};border-bottom:1px solid {LINE};">{label}</td>'
+            for label, width in zip(headers, widths)
+        )
+        if agent.get("inactive_more", 0):
+            rows.append(
+                f'<tr><td colspan="6" align="center" style="{FONT}font-size:11px;color:{MUTED};padding:8px;">'
+                f'+ {int(agent["inactive_more"]):,} additional inactive agents</td></tr>'
+            )
+        parts.append(
+            f'<div style="{FONT}font-size:13px;font-weight:bold;color:{INK};padding:16px 0 8px;">'
+            f'Agents needing attention ({inactive:,})</div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAPER}" '
+            f'style="border:1px solid {LINE};border-radius:10px;border-collapse:collapse;table-layout:fixed;">'
+            f'<tr>{th}</tr>{"".join(rows)}</table>'
+        )
+    return "".join(parts)
+
+
 def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     v = d.get("vuln")
     head = _sec_head(
@@ -614,11 +709,12 @@ def _vuln(d: Dict[str, Any], n: int = 5) -> str:
         return head + _pending("Athena scanning")
     crit_cap = v.get("critical_note") or ("none open" if v["crit_open"] == 0 else "across the estate")
     high_cap = v.get("high_note") or ("none open" if v["high_open"] == 0 else "across the estate")
+    links = v.get("links", {})
     tiles = [
-        _tile("red", "Critical open", f'{v["crit_open"]:,}', crit_cap),
-        _tile("amber", "High open", f'{v["high_open"]:,}', high_cap),
-        _tile("green", "Resolved this week", f'{v["resolved"]:,}', v["resolved_delta"]),
-        _tile("blue", "Newly detected", f'{v["new"]:,}', f'net <b>{v["net"]:+,}</b> open'),
+        _tile("red", "Critical open", f'{v["crit_open"]:,}', crit_cap, href=links.get("critical", "")),
+        _tile("amber", "High open", f'{v["high_open"]:,}', high_cap, href=links.get("high", "")),
+        _tile("green", "Resolved this week", f'{v["resolved"]:,}', v["resolved_delta"], href=links.get("resolved", "")),
+        _tile("blue", "Newly detected", f'{v["new"]:,}', f'net <b>{v["net"]:+,}</b> open', href=links.get("new", "")),
     ]
     parts = [head, _tile_grid(tiles, 4)]
     sev_rows = [(lbl, val, SEV_FILL[lbl]) for lbl, val in v["severity"]]
@@ -635,7 +731,7 @@ def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     sev_inner = (
         f'<div style="{FONT}font-size:12.5px;font-weight:680;color:{INK};">Open vulnerabilities by severity</div>'
         f'<div style="{FONT}font-size:12px;color:{MUTED};padding-top:2px;">{v["total_open"]:,} open across the estate</div>'
-        f'<div style="padding-top:12px;">{v_sev_body}</div>'
+        f'<div style="padding-top:12px;">{v_sev_body}</div>{_link_cta(links.get("severity", ""))}'
     )
 
     def cve_rows(items: Sequence[Sequence[Any]], tint: str) -> str:
@@ -693,7 +789,7 @@ def _vuln(d: Dict[str, Any], n: int = 5) -> str:
                      "vulnerabilities remediated this week met their patch-management SLA.</div>")
         parts.append(_card("Remediation SLA attainment",
                            "Share remediated within target time, by severity — green &ge; 95%, amber &ge; 80%, red below",
-                           body, top=12))
+                           body + _link_cta(links.get("sla", "")), top=12))
     if v.get("note"):
         parts.append(f'<div style="{FONT}font-size:12px;color:{MUTED};padding:12px 2px 0;">{esc(v["note"])}</div>')
     return "".join(parts)
@@ -760,6 +856,8 @@ def render_email(data: Dict[str, Any]) -> str:
         body.append(_device(data, nxt()))
     if sections.get("endpoint", True):
         body.append(_endpoint(data, nxt()))
+    if sections.get("agent_status", True):
+        body.append(_agent_status(data, nxt()))
     if sections.get("vuln", True):
         body.append(_vuln(data, nxt()))
     if sections.get("availability", True):

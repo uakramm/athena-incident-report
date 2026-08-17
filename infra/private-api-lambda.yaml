@@ -93,6 +93,16 @@ Resources:
           ToPort: 9200
           CidrIp: !Ref VpcCidr
           Description: Tenant OpenSearch indexer HTTPS
+        - IpProtocol: tcp
+          FromPort: 55000
+          ToPort: 55000
+          CidrIp: 10.0.1.103/32
+          Description: Athena Wazuh Manager API HTTPS
+        - IpProtocol: tcp
+          FromPort: 55000
+          ToPort: 55000
+          CidrIp: 10.0.2.50/32
+          Description: NBS Wazuh Manager API HTTPS
       Tags:
         - Key: Name
           Value: !Sub "${AppName}-${EnvironmentName}-workers-sg"

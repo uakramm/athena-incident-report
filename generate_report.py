@@ -83,6 +83,7 @@ def section_enablement() -> Dict[str, bool]:
     return {
         "device": _env_bool("REPORT_ENABLE_DEVICE_MANAGEMENT", False),
         "endpoint": _env_bool("REPORT_ENABLE_ENDPOINT_MANAGEMENT", False),
+        "agent_status": _env_bool("REPORT_ENABLE_AGENT_STATUS", True),
         "vuln": _env_bool("REPORT_ENABLE_VULNERABILITY_STATUS", True),
         "availability": _env_bool("REPORT_ENABLE_SYSTEM_AVAILABILITY", False),
     }
@@ -242,6 +243,10 @@ class JiraError(RuntimeError):
 
 
 class OpenSearchError(RuntimeError):
+    pass
+
+
+class WazuhManagerError(RuntimeError):
     pass
 
 
@@ -465,6 +470,11 @@ class OpenSearchClient:
                 f"{method} {path} -> HTTP {response.status_code}\n{response.text[:800]}"
             )
         return response.json() if response.content else None
+
+    def query_index(self, index: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Run a read-only search against another index on the tenant indexer."""
+        safe_index = urllib.parse.quote(index, safe="*-_.")
+        return self._req("POST", f"/{safe_index}/_search", json=body)
 
     def _load_issues(self) -> List[Dict[str, Any]]:
         if self._issues is not None:
@@ -894,6 +904,201 @@ class OpenSearchClient:
         return len(self.search(jql, [], limit=1000000))
 
 
+def jira_search_url(cli: Any, jql: str) -> str:
+    base = str(getattr(cli, "browse_base", "") or "").rstrip("/")
+    return f"{base}/issues/?{urllib.parse.urlencode({'jql': jql})}" if base else ""
+
+
+def _wazuh_manager_base_url() -> str:
+    raw_host = _env("WAZUH_HOST", "")
+    if not raw_host:
+        raise WazuhManagerError("WAZUH_HOST is required for the Agent Status section.")
+    if "://" not in raw_host:
+        raw_host = f"https://{raw_host}"
+    parsed = urllib.parse.urlsplit(raw_host)
+    if not parsed.hostname:
+        raise WazuhManagerError("WAZUH_HOST must be a valid hostname or URL.")
+    if parsed.port is None:
+        try:
+            port = int(_env("WAZUH_PORT", "55000"))
+        except ValueError as exc:
+            raise WazuhManagerError("WAZUH_PORT must be a number.") from exc
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        netloc = f"{host}:{port}"
+    else:
+        netloc = parsed.netloc
+    return urllib.parse.urlunsplit((parsed.scheme or "https", netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _wazuh_manager_agents() -> List[Dict[str, Any]]:
+    if requests is None:
+        raise WazuhManagerError(
+            "The 'requests' package is required for Wazuh Manager. "
+            "Run: pip install -r requirements.txt"
+        )
+    user = _env("WAZUH_USER", "")
+    password = os.getenv("WAZUH_PASS") or ""
+    if not user or not password:
+        raise WazuhManagerError(
+            "WAZUH_USER and WAZUH_PASS are required for the Agent Status section."
+        )
+    base_url = _wazuh_manager_base_url()
+    verify_ssl = _env_bool("WAZUH_VERIFY_SSL", True)
+    try:
+        timeout = max(float(_env("WAZUH_TIMEOUT_SECONDS", "30")), 1.0)
+    except ValueError:
+        timeout = 30.0
+    try:
+        page_size = min(max(int(_env("WAZUH_AGENT_PAGE_SIZE", "500")), 1), 10000)
+    except ValueError:
+        page_size = 500
+
+    session = requests.Session()
+    log(f"Wazuh Manager agent load start: endpoint={base_url}")
+    try:
+        auth_response = session.post(
+            f"{base_url}/security/user/authenticate",
+            auth=(user, password),
+            timeout=timeout,
+            verify=verify_ssl,
+        )
+        if auth_response.status_code not in (200, 201):
+            raise WazuhManagerError(
+                f"Wazuh Manager authentication failed with HTTP {auth_response.status_code}."
+            )
+        try:
+            token = str(((auth_response.json().get("data") or {}).get("token")) or "")
+        except (TypeError, ValueError) as exc:
+            raise WazuhManagerError("Wazuh Manager authentication returned invalid JSON.") from exc
+        if not token:
+            raise WazuhManagerError("Wazuh Manager authentication did not return a token.")
+
+        session.headers.update({"Authorization": f"Bearer {token}", "Accept": "application/json"})
+        agents: List[Dict[str, Any]] = []
+        offset = 0
+        while True:
+            response = session.get(
+                f"{base_url}/agents",
+                params={
+                    "limit": page_size,
+                    "offset": offset,
+                    "select": "id,name,status,lastKeepAlive,os.name,os.platform,os.version",
+                    "sort": "+id",
+                },
+                timeout=timeout,
+                verify=verify_ssl,
+            )
+            if response.status_code != 200:
+                raise WazuhManagerError(
+                    f"Wazuh Manager agent query failed with HTTP {response.status_code}."
+                )
+            try:
+                data = response.json().get("data") or {}
+                page = data.get("affected_items") or []
+                total = int(data.get("total_affected_items") or len(page))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise WazuhManagerError("Wazuh Manager agent query returned invalid JSON.") from exc
+            if not isinstance(page, list):
+                raise WazuhManagerError("Wazuh Manager agent query returned an invalid agent list.")
+            agents.extend(item for item in page if isinstance(item, dict))
+            offset += len(page)
+            if not page or offset >= total:
+                break
+        log(f"Wazuh Manager agent load done: agents={len(agents)}")
+        return agents
+    except requests.RequestException as exc:
+        raise WazuhManagerError(f"Wazuh Manager request failed for {base_url}: {exc}") from exc
+    finally:
+        session.close()
+
+
+def _wazuh_timestamp(value: Any) -> Optional[dt.datetime]:
+    if value in (None, ""):
+        return None
+    raw = str(value).strip()
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def agent_status_snapshot(_cli: Any, now: Optional[dt.datetime] = None) -> Dict[str, Any]:
+    """Build the same heartbeat snapshot used by the Agent Summary report.
+
+    Agents seen in the last 24 hours are active. Inactive agents are grouped into
+    24-72 hour, 3-7 day, and 7-14 day buckets; records older than 14 days are
+    intentionally excluded to match the established report definition.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    active = 0
+    inactive_agents: List[Dict[str, Any]] = []
+    bucket_counts = {"inactive_24_72": 0, "inactive_3_7d": 0, "inactive_7_14d": 0}
+    agents = _wazuh_manager_agents()
+    for agent in agents:
+        if str(agent.get("id") or "") == "000" and not _env_bool("REPORT_AGENT_INCLUDE_MANAGER", False):
+            continue
+        last_seen = _wazuh_timestamp(agent.get("lastKeepAlive"))
+        if last_seen is None:
+            continue
+        hours = max((now - last_seen).total_seconds() / 3600, 0)
+        if hours > 336:
+            continue
+        if hours <= 24:
+            active += 1
+            continue
+        if hours >= 168:
+            category, key, priority = "Inactive 7-14 days", "inactive_7_14d", 3
+        elif hours >= 72:
+            category, key, priority = "Inactive 3-7 days", "inactive_3_7d", 2
+        else:
+            category, key, priority = "Inactive 24-72 hours", "inactive_24_72", 1
+        bucket_counts[key] += 1
+        os_data = agent.get("os") if isinstance(agent.get("os"), dict) else {}
+        os_name = str(
+            (os_data or {}).get("name")
+            or (os_data or {}).get("platform")
+            or (os_data or {}).get("version")
+            or "Unknown"
+        )
+        inactive_agents.append({
+            "name": str(agent.get("name") or "Unknown"),
+            "id": str(agent.get("id") or "-"),
+            "os": os_name,
+            "last_seen": strip_leading_zero(last_seen.strftime("%d %b %Y, %H:%M UTC")),
+            "inactive": fmt_age(last_seen, now),
+            "hours": hours,
+            "category": category,
+            "priority": priority,
+        })
+    inactive_agents.sort(key=lambda item: (-item["priority"], -item["hours"], item["name"].lower()))
+    try:
+        max_rows = max(int(_env("REPORT_AGENT_MAX_ROWS", "10")), 0)
+    except ValueError:
+        max_rows = 10
+    inactive = len(inactive_agents)
+    total = active + inactive
+    dashboard_url = _env("REPORT_AGENT_STATUS_URL", "")
+    if not dashboard_url:
+        dashboard_base = _env("DASHBOARD_BASE_URL", "").rstrip("/")
+        if dashboard_base:
+            dashboard_url = f"{dashboard_base}/app/endpoints-summary#/agents-preview/"
+    return {
+        "total": total,
+        "active": active,
+        "inactive": inactive,
+        **bucket_counts,
+        "inactive_agents": inactive_agents[:max_rows],
+        "inactive_more": max(inactive - max_rows, 0),
+        "dashboard_url": dashboard_url,
+        "source": "wazuh-manager",
+    }
+
+
 def jira_site_url() -> str:
     """Jira site URL, from JIRA_SITE_URL (or JIRA_BASE_URL, as athena-pallas names it)."""
     return _env("JIRA_SITE_URL", "") or _env("JIRA_BASE_URL", "")
@@ -1234,6 +1439,21 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
 
     def open_at(types: str, e: dt.date) -> str:
         return scoped(types, f'created < "{d(e)}"', f'(resolutiondate is EMPTY OR resolutiondate >= "{d(e)}")')
+
+    opened_incident_jql = incidents_only(opened(INC_TYPES, start, end))
+    closed_incident_jql = incidents_only(closed(INC_TYPES, start, end))
+    open_incident_jql = incidents_only(open_at(INC_TYPES, end))
+    incident_links = {
+        "opened": jira_search_url(cli, opened_incident_jql),
+        "closed": jira_search_url(cli, closed_incident_jql),
+        "open": jira_search_url(cli, open_incident_jql),
+        "lifecycle_opened": jira_search_url(cli, opened_incident_jql),
+        "lifecycle_closed": jira_search_url(cli, closed_incident_jql),
+        "severity": jira_search_url(cli, opened_incident_jql),
+        "trend": jira_search_url(cli, incidents_only(opened(INC_TYPES, start - dt.timedelta(days=35), end))),
+        "type": jira_search_url(cli, opened_incident_jql),
+        "sla": jira_search_url(cli, closed_incident_jql),
+    }
 
     # ---- exec counts ----
     log("Report build phase: executive incident counts.")
@@ -1581,6 +1801,32 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     log("Report build phase: project metadata.")
     project_name = os.getenv("REPORT_PROJECT_NAME") or cli.project_name(key) or ""
     log(f"Project metadata done: project_name={project_name}")
+
+    sections_enabled = section_enablement()
+    agent_data = (args.supplemental_data or {}).get("agent_status")
+    if sections_enabled.get("agent_status", True) and agent_data is None:
+        log("Report build phase: agent heartbeat status.")
+        try:
+            agent_data = agent_status_snapshot(cli, now)
+            log(
+                "Agent heartbeat status done: "
+                f"total={agent_data['total']} active={agent_data['active']} inactive={agent_data['inactive']}"
+            )
+        except (WazuhManagerError, OpenSearchError, AttributeError, TypeError, ValueError) as exc:
+            log(f"Agent heartbeat status unavailable: {exc}", level="WARNING")
+            agent_data = {"unavailable": True}
+
+    vuln_open_jql = scoped(VULN_TYPE, "statusCategory != Done", "resolution is EMPTY", sev_in(vuln_filter_values))
+    vuln_closed_jql = closed(VULN_TYPE, start, end)
+    vuln_new_jql = opened(VULN_TYPE, start, end)
+    vuln_links = {
+        "critical": jira_search_url(cli, scoped(VULN_TYPE, "statusCategory != Done", "resolution is EMPTY", sev_in(vuln_label_values.get("Critical", ["Sev-1"])))),
+        "high": jira_search_url(cli, scoped(VULN_TYPE, "statusCategory != Done", "resolution is EMPTY", sev_in(vuln_label_values.get("High", ["Sev-2"])))),
+        "resolved": jira_search_url(cli, vuln_closed_jql),
+        "new": jira_search_url(cli, vuln_new_jql),
+        "severity": jira_search_url(cli, vuln_open_jql),
+        "sla": jira_search_url(cli, vuln_closed_jql),
+    }
     data: Dict[str, Any] = {
         "client": args.client, "environment": args.environment, "tenant": args.tenant,
         "project_key": key, "project_name": project_name,
@@ -1602,11 +1848,13 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
             "mttc": fmt_duration(mttc), "mttc_delta": _dur_delta(mttc, p_mttc),
             "uptime": (args.supplemental_data.get("availability", {}).get("uptime", "—") if args.supplemental_data else "—"),
             "uptime_note": (f'SLA {args.supplemental_data.get("availability", {}).get("sla", "")} · met' if args.supplemental_data and args.supplemental_data.get("availability") else "provided separately"),
+            "links": incident_links,
         },
         "commentary": commentary,
         "inc_severity": inc_sev, "inc_total_opened": opened_n,
         "type_breakdown": type_breakdown, "sla": sla,
         "trend": trend, "sev_trend": sev_trend, "sev_trend_labels": inc_labels,
+        "inc_links": incident_links,
         "inc_src": "Athena Pallas · Jira-synced Security Alert + Security Incident",
         "inc_summary_line": (
             f"During the week, <b>{opened_n:,}</b> incidents opened and <b>{closed_n:,}</b> closed. "
@@ -1622,17 +1870,19 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
             "critical_note": "", "high_note": "", "resolved": v_resolved,
             "resolved_delta": delta_html(v_resolved, v_resolved_prev, favorable="up"),
             "new": v_new, "net": v_new - v_resolved, "severity": vuln_sev,
-            "total_open": total_open, "top_crit": top_crit, "top_high": top_high, "sla": vuln_sla, "note": "",
+            "total_open": total_open, "top_crit": top_crit, "top_high": top_high, "sla": vuln_sla,
+            "links": vuln_links, "note": "",
         },
+        "agent_status": agent_data,
         "vuln_src": "Athena Pallas · Jira-synced vulnerabilities",
-        "_sections_enabled": section_enablement(),
+        "_sections_enabled": sections_enabled,
     }
     # supplemental (device / endpoint / availability)
     if args.supplemental_data:
-        for section in ("device", "endpoint", "availability"):
+        for section in ("device", "endpoint", "agent_status", "availability"):
             if section in args.supplemental_data:
                 data[section] = args.supplemental_data[section]
-    log(f"Report build done: elapsed={time.perf_counter() - build_started:.2f}s sections={section_enablement()}")
+    log(f"Report build done: elapsed={time.perf_counter() - build_started:.2f}s sections={sections_enabled}")
     return data
 
 
@@ -1688,10 +1938,25 @@ def top_cves(cli: Any, jql: str, args: argparse.Namespace, kind: str) -> List[Tu
 # --------------------------------------------------------------------------- #
 
 def sample_data() -> Dict[str, Any]:
+    jira_filter = "https://example.atlassian.net/issues/?jql=project%3DNSO"
+    incident_links = {
+        key: jira_filter for key in (
+            "opened", "closed", "open", "lifecycle_opened", "lifecycle_closed",
+            "severity", "trend", "type", "sla",
+        )
+    }
+    vuln_links = {key: jira_filter for key in ("critical", "high", "resolved", "new", "severity", "sla")}
     return {
         "client": "Neuro", "environment": "Production", "tenant": "neuro.athenasecuritygrp.com",
         "project_key": "NSO", "project_name": "Neuro Security Operations",
         "period_label": "Mon 29 Jun – Sun 5 Jul 2026", "week_start": "Monday", "_period_end": "2026-07-05",
+        "_sections_enabled": {
+            "device": False,
+            "endpoint": False,
+            "agent_status": True,
+            "vuln": True,
+            "availability": False,
+        },
         "generated": "6 Jul 2026, 09:01 ET", "support_email": "alerts@neuro.athenasecuritygrp.com",
         "preview_note": ("<strong>Template preview.</strong> Illustrative sample data — run "
                          "<code>generate_report.py</code> against a client's pallas-incidents index for live figures."),
@@ -1704,6 +1969,7 @@ def sample_data() -> Dict[str, Any]:
             "mttr": "11 min", "mttr_delta": '<b class="up">▼ 4 min</b> vs last week',
             "mttc": "3h 42m", "mttc_delta": '<b class="up">▼ 22 min</b> vs last week',
             "uptime": "99.98%", "uptime_note": "SLA 99.9% · met",
+            "links": incident_links,
         },
         "commentary": (
             "<p>A steadier week overall. Alert volume rose 24% on the back of a phishing wave targeting "
@@ -1741,6 +2007,7 @@ def sample_data() -> Dict[str, Any]:
             {"label": "This wk", "Critical": 8, "High": 27, "Medium": 37},
         ],
         "inc_src": "Athena Pallas · Jira-synced Security Alert + Security Incident",
+        "inc_links": incident_links,
         "inc_summary_line": "During the week, <b>72</b> incidents opened and <b>66</b> closed. At the reporting cut-off, <b>6</b> remained open.",
         "open_count": 6,
         "open_rows": [
@@ -1772,6 +2039,17 @@ def sample_data() -> Dict[str, Any]:
             "inactive_agents": [["LAP-014", "Windows 11", "4 Jul 22:15 UTC", "34h"],
                                  ["dev-nrm-01", "Ubuntu 22.04", "4 Jul 18:25 UTC", "38h"]],
         },
+        "agent_status": {
+            "total": 84, "active": 78, "inactive": 6,
+            "inactive_24_72": 2, "inactive_3_7d": 3, "inactive_7_14d": 1,
+            "dashboard_url": "https://neuro.athenasecuritygrp.com/app/endpoints-summary#/agents-preview/",
+            "inactive_agents": [
+                {"name": "LAP-014", "id": "041", "os": "Windows 11", "last_seen": "4 Jul 2026, 22:15 UTC", "inactive": "34h", "category": "Inactive 24-72 hours"},
+                {"name": "dev-nrm-01", "id": "057", "os": "Ubuntu 22.04", "last_seen": "1 Jul 2026, 18:25 UTC", "inactive": "3d 19h", "category": "Inactive 3-7 days"},
+                {"name": "WKS-233", "id": "063", "os": "Windows 11", "last_seen": "26 Jun 2026, 09:10 UTC", "inactive": "9d 4h", "category": "Inactive 7-14 days"},
+            ],
+            "inactive_more": 3,
+        },
         "vuln": {
             "crit_open": 4, "high_open": 31, "critical_note": "across the estate",
             "high_note": "across 12 assets", "resolved": 47,
@@ -1788,6 +2066,7 @@ def sample_data() -> Dict[str, Any]:
             "top_high": [("CVE-2026-43701", "#", 8), ("CVE-2026-43715", "#", 8),
                          ("CVE-2025-47273", "#", 5), ("CVE-2024-6345", "#", 5),
                          ("CVE-2026-43722", "#", 4), ("CVE-2025-51904", "#", 3)],
+            "links": vuln_links,
             "note": "The OpenSSL cluster on SRV-DB-02 is prioritized via NSO-4851.",
         },
         "vuln_src": "Athena Pallas · Jira-synced vulnerabilities",
@@ -1833,7 +2112,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--max-open-rows", type=int, default=40)
     p.add_argument("--max-closed-rows", type=int, default=6)
 
-    p.add_argument("--supplemental", help="JSON file with device/endpoint/availability data (not in the incident index).")
+    p.add_argument(
+        "--supplemental",
+        help="JSON file with optional device/endpoint/agent-status/availability overrides.",
+    )
     p.add_argument("--email", action="store_true",
                    help="Also write an email-safe HTML version (<out>-email.html) for pasting into Outlook.")
 

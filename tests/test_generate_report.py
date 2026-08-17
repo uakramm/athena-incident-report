@@ -20,6 +20,87 @@ class DateFormattingTests(unittest.TestCase):
         )
 
 
+class AgentStatusTests(unittest.TestCase):
+    def test_heartbeat_snapshot_matches_agent_summary_buckets(self) -> None:
+        now = dt.datetime(2026, 8, 17, 12, 0, tzinfo=dt.timezone.utc)
+
+        def agent(name: str, age: dt.timedelta, agent_id: str) -> dict:
+            return {
+                "id": agent_id,
+                "name": name,
+                "lastKeepAlive": (now - age).isoformat().replace("+00:00", "Z"),
+                "os": {"name": "Windows 11"},
+            }
+
+        agents = [
+            agent("manager", dt.timedelta(hours=1), "000"),
+            agent("active", dt.timedelta(hours=12), "001"),
+            agent("short", dt.timedelta(hours=48), "002"),
+            agent("week", dt.timedelta(days=5), "003"),
+            agent("fortnight", dt.timedelta(days=10), "004"),
+            agent("stale", dt.timedelta(days=15), "005"),
+        ]
+        with mock.patch.object(generate_report, "_wazuh_manager_agents", return_value=agents):
+            result = generate_report.agent_status_snapshot(None, now)
+
+        self.assertEqual(result["total"], 4)
+        self.assertEqual(result["active"], 1)
+        self.assertEqual(result["inactive"], 3)
+        self.assertEqual(result["inactive_24_72"], 1)
+        self.assertEqual(result["inactive_3_7d"], 1)
+        self.assertEqual(result["inactive_7_14d"], 1)
+        self.assertEqual([row["name"] for row in result["inactive_agents"]], ["fortnight", "week", "short"])
+        self.assertEqual(result["source"], "wazuh-manager")
+
+    def test_manager_client_authenticates_and_paginates(self) -> None:
+        class Response:
+            def __init__(self, status_code: int, payload: dict) -> None:
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self) -> dict:
+                return self._payload
+
+        class Session:
+            def __init__(self) -> None:
+                self.headers = {}
+                self.offsets = []
+                self.closed = False
+
+            def post(self, url: str, **kwargs) -> Response:
+                self.auth_url = url
+                self.auth_kwargs = kwargs
+                return Response(200, {"data": {"token": "test-token"}})
+
+            def get(self, url: str, **kwargs) -> Response:
+                self.offsets.append(kwargs["params"]["offset"])
+                offset = kwargs["params"]["offset"]
+                item = {"id": f"{offset + 1:03d}", "name": f"agent-{offset + 1}"}
+                return Response(200, {"data": {"affected_items": [item], "total_affected_items": 2}})
+
+            def close(self) -> None:
+                self.closed = True
+
+        session = Session()
+        env = {
+            "WAZUH_HOST": "manager.internal",
+            "WAZUH_USER": "report-user",
+            "WAZUH_PASS": "secret",
+            "WAZUH_VERIFY_SSL": "false",
+            "WAZUH_AGENT_PAGE_SIZE": "1",
+        }
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+            generate_report.requests, "Session", return_value=session
+        ):
+            agents = generate_report._wazuh_manager_agents()
+
+        self.assertEqual(session.auth_url, "https://manager.internal:55000/security/user/authenticate")
+        self.assertEqual(session.offsets, [0, 1])
+        self.assertEqual([item["id"] for item in agents], ["001", "002"])
+        self.assertEqual(session.headers["Authorization"], "Bearer test-token")
+        self.assertTrue(session.closed)
+
+
 class IncidentSeverityTests(unittest.TestCase):
     def test_standard_sev_2_is_high(self) -> None:
         fields = {"summary": "[HIGH] [Office 365] Suspicious email", "severity": {"value": "Sev-2"}}

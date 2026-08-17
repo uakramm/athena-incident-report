@@ -4,6 +4,18 @@ This tool builds the weekly security report from the tenant's OpenSearch
 `pallas-incidents` index and emails it to the client. Jira remains authoritative;
 the Pallas sync service mirrors its latest ticket state into this index.
 
+The report includes summary-level incident metrics with Jira drill-down links,
+an Agent Status section sourced from the Wazuh Manager API, and vulnerability
+metrics. It intentionally omits the long open/closed ticket tables; users can
+open the filtered Jira result behind each metric when they need ticket detail.
+
+Agent Status follows the existing Agent Summary definition: an agent is active
+when it reported within 24 hours, inactive agents are grouped into 24-72 hours,
+3-7 days, and 7-14 days, and agents not seen for more than 14 days are excluded.
+Configure `WAZUH_HOST`, `WAZUH_USER`, `WAZUH_PASS`, and `WAZUH_VERIFY_SSL` in
+the tenant env file. `WAZUH_PORT` defaults to `55000`. The optional
+`REPORT_AGENT_STATUS_URL` controls the report's agent-detail link.
+
 ## First-time setup (only once)
 
 Open a terminal in this folder and run these three lines.

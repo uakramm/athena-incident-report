@@ -40,10 +40,12 @@ a:hover { text-decoration:underline; }
 .metaline b { color:var(--ink-2); font-weight:600; }
 
 section { margin:0 0 28px; }
-.sec-head { display:flex; align-items:baseline; gap:12px; margin:0 0 14px; padding-bottom:9px; border-bottom:2px solid var(--line); }
+.sec-head { display:flex; align-items:baseline; flex-wrap:wrap; gap:12px; margin:0 0 14px; padding-bottom:9px; border-bottom:2px solid var(--line); }
 .eyebrow { font-size:10.5px; letter-spacing:0.13em; text-transform:uppercase; font-weight:700; color:var(--brand); }
 .sec-head h2 { margin:0; font-size:18px; font-weight:680; letter-spacing:-0.01em; }
 .sec-head .src { margin-left:auto; font-size:11px; color:var(--muted); }
+.section-link { margin-left:12px; color:var(--link); font-weight:650; text-decoration:none; white-space:nowrap; }
+.section-link:hover { text-decoration:underline; }
 
 .card { background:var(--paper); border:1px solid var(--line); border-radius:12px; padding:18px; box-shadow:var(--shadow);
   display:flex; flex-direction:column; }
@@ -74,9 +76,13 @@ section { margin:0 0 28px; }
 .tile { border:1px solid var(--line); border-radius:12px; padding:14px 15px; background:var(--paper); box-shadow:var(--shadow); }
 .tile .lab { font-size:10.5px; letter-spacing:0.05em; text-transform:uppercase; color:var(--muted); font-weight:700; }
 .tile .num { font-size:28px; font-weight:750; letter-spacing:-0.02em; margin-top:5px; line-height:1; color:var(--ink); }
+.tile .num a { color:inherit; text-decoration:none; }
 .tile .num.sm { font-size:22px; }
 .tile .delta { font-size:11.5px; margin-top:7px; color:var(--muted); }
 .tile .delta b { font-weight:700; }
+.metric-cta { display:inline-block; margin-top:9px; color:var(--link); font-size:11.5px; font-weight:650;
+  letter-spacing:0; text-decoration:none; }
+.metric-cta:hover { text-decoration:underline; }
 .up { color:var(--good-ink); } .down { color:var(--crit-ink); }
 .tile.red{ background:var(--crit-bg); border-color:var(--crit-bd); } .tile.red .num{ color:var(--crit-ink); }
 .tile.amber{ background:var(--high-bg); border-color:var(--high-bd); } .tile.amber .num{ color:var(--high-ink); }
@@ -157,6 +163,8 @@ td .sum{ color:var(--ink); }
 @media (max-width:760px){
   .t6,.t5,.t4{ grid-template-columns:repeat(2,1fr); }
   .grid2{ grid-template-columns:1fr; }
+  .sec-head .src{ width:100%; margin-left:0; }
+  .section-link{ margin-left:8px; }
   .foot .defs{ grid-template-columns:1fr; }
   .band h1{ font-size:22px; }
 }

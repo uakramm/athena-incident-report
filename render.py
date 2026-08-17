@@ -201,12 +201,23 @@ def _pill(sev_class: str, label: str) -> str:
     return f'<span class="pill {sev_class}">{esc(label)}</span>'
 
 
-def _tile(cls: str, lab: str, num: str, delta_html: str, small: bool = False) -> str:
+def _metric_cta(href: str, label: str = "View in Jira") -> str:
+    if not href:
+        return ""
+    return f'<a class="metric-cta" href="{esc(href)}">{esc(label)} &rarr;</a>'
+
+
+def _tile(
+    cls: str, lab: str, num: str, delta_html: str, small: bool = False,
+    href: str = "", link_label: str = "View in Jira", show_cta: bool = True,
+) -> str:
     sm = " sm" if small else ""
     cls_attr = f" {cls}" if cls else ""
+    number = f'<a href="{esc(href)}">{esc(num)}</a>' if href else esc(num)
     return (
         f'<div class="tile{cls_attr}"><div class="lab">{esc(lab)}</div>'
-        f'<div class="num{sm}">{esc(num)}</div><div class="delta">{delta_html}</div></div>'
+        f'<div class="num{sm}">{number}</div><div class="delta">{delta_html}</div>'
+        f'{_metric_cta(href, link_label) if show_cta else ""}</div>'
     )
 
 
@@ -249,24 +260,30 @@ def _sla_meters(rows: Sequence[Sequence[Any]]) -> str:
     return "".join(out)
 
 
-def _sec_head(eyebrow: str, title: str, src: str) -> str:
+def _sec_head(
+    eyebrow: str, title: str, src: str, href: str = "", link_label: str = "",
+) -> str:
+    source = esc(src)
+    if href and link_label:
+        source += f'<a class="section-link" href="{esc(href)}">{esc(link_label)} &rarr;</a>'
     return (
         f'<div class="sec-head"><span class="eyebrow">{esc(eyebrow)}</span>'
-        f'<h2>{esc(title)}</h2><span class="src">{esc(src)}</span></div>'
+        f'<h2>{esc(title)}</h2><span class="src">{source}</span></div>'
     )
 
 
 def _exec(d: Dict[str, Any], n: int = 1) -> str:
     e = d["exec"]
+    links = e.get("links", {})
     tiles = [
-        _tile("blue", "Incidents opened", f'{e["opened"]:,}', e["opened_delta"]),
-        _tile("green", "Incidents closed", f'{e["closed"]:,}', e["closed_delta"]),
-        _tile("red", "Open at week end", f'{e["open"]:,}', e["open_delta"]),
+        _tile("blue", "Incidents opened", f'{e["opened"]:,}', e["opened_delta"], href=links.get("opened", "")),
+        _tile("green", "Incidents closed", f'{e["closed"]:,}', e["closed_delta"], href=links.get("closed", "")),
+        _tile("red", "Open at week end", f'{e["open"]:,}', e["open_delta"], href=links.get("open", "")),
         _tile("green", "System availability", e["uptime"], e["uptime_note"], small=True),
-        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True),
-        _tile("", "Mean time to ticket", e["mttt"], e["mttt_delta"], small=True),
-        _tile("", "Mean time to respond", e["mttr"], e["mttr_delta"], small=True),
-        _tile("", "Mean time to close", e["mttc"], e["mttc_delta"], small=True),
+        _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True, href=links.get("lifecycle_opened", ""), show_cta=False),
+        _tile("", "Mean time to ticket", e["mttt"], e["mttt_delta"], small=True, href=links.get("lifecycle_opened", ""), show_cta=False),
+        _tile("", "Mean time to respond", e["mttr"], e["mttr_delta"], small=True, href=links.get("lifecycle_opened", ""), show_cta=False),
+        _tile("", "Mean time to close", e["mttc"], e["mttc_delta"], small=True, href=links.get("lifecycle_closed", ""), show_cta=False),
     ]
     return (
         "<section>" + _sec_head(f"{n:02d} · This week at a glance", "Executive summary", "") +
@@ -340,8 +357,7 @@ def _table_cols(widths: Sequence[int]) -> str:
 
 def _incidents(d: Dict[str, Any], n: int = 2) -> str:
     sev_rows = [(lbl, val, SEV_CLASS[lbl]) for lbl, val in d["inc_severity"]]
-    open_rows = _inc_open_rows(d["open_rows"], d.get("open_more", 0))
-    closed_rows = _inc_closed_rows(d["closed_rows"], d.get("closed_more", 0))
+    links = d.get("inc_links", {})
     status_series = [("opened", "var(--s-opened)"), ("closed", "var(--s-closed)"), ("open", "var(--s-open)")]
     status_legend = _legend([("Opened", "var(--s-opened)"), ("Closed", "var(--s-closed)"), ("Open at week end", "var(--s-open)")])
     # Severity-over-time (Peter's "severity over time") — full-width card, when present.
@@ -352,7 +368,8 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
         sev_card = (
             '<div class="card" style="margin-top:16px;"><p class="card-h">Severity over time</p>'
             '<p class="caption" style="margin:2px 0 6px;">Incidents opened per week, by severity</p>'
-            + _legend(sev_series) + lines_svg(d["sev_trend"], sev_series, "Severity over time") + "</div>"
+            + _legend(sev_series) + lines_svg(d["sev_trend"], sev_series, "Severity over time")
+            + "</div>"
         )
     # Incidents-by-type + response-SLA attainment — paired row, each shown only when present.
     type_card = ""
@@ -360,7 +377,8 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
         type_card = (
             '<div class="card"><p class="card-h">Incidents by type</p>'
             '<p class="caption" style="margin:2px 0 6px;">Opened this week, by classification</p>'
-            f'<div class="chart-fill">{catbar_svg(d["type_breakdown"])}</div></div>'
+            f'<div class="chart-fill">{catbar_svg(d["type_breakdown"])}</div>'
+            '</div>'
         )
     sla_card = ""
     sla = d.get("sla")
@@ -383,28 +401,23 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
     if sla_card:
         extra += f'<div style="margin-top:16px;">{sla_card}</div>'
     return (
-        "<section>" + _sec_head(f"{n:02d} · Detection & response", "Incident management", d.get("inc_src", "Athena Pallas · Jira-synced incidents")) +
+        "<section>" + _sec_head(
+            f"{n:02d} · Detection & response", "Incident management",
+            d.get("inc_src", "Athena Pallas · Jira-synced incidents"),
+            links.get("opened", ""), "View incidents in Jira",
+        ) +
         '<div class="grid2">'
         '<div class="card"><p class="card-h">Opened by severity</p>'
         f'<p class="caption" style="margin:2px 0 6px;">This week · {sum(val for _, val in d["inc_severity"]):,} shown</p>'
-        f'<div class="chart-fill">{hbar_svg(sev_rows)}</div></div>'
+        f'<div class="chart-fill">{hbar_svg(sev_rows)}</div>'
+        + _metric_cta(links.get("severity", ""), "Open in Jira") + '</div>'
         '<div class="card"><p class="card-h">Six-week trend</p>'
         '<p class="caption" style="margin:2px 0 6px;">Opened, closed &amp; still-open per week</p>'
-        + status_legend + f'<div class="chart-fill">{lines_svg(d["trend"], status_series, "Opened, closed and open per week")}</div></div></div>'
+        + status_legend + f'<div class="chart-fill">{lines_svg(d["trend"], status_series, "Opened, closed and open per week")}</div>'
+        + '</div></div>'
         + sev_card + extra +
         f'<p class="caption">{d.get("inc_summary_line", "")}</p>'
-        f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Open at week end ({d.get("open_count", len(d["open_rows"])):,})</h3>'
-        '<div class="tbl-wrap"><table class="incident-table"><colgroup>'
-        '<col style="width:8%"><col style="width:9%"><col style="width:11%"><col style="width:25%">'
-        '<col style="width:10%"><col style="width:9%"><col style="width:6%"><col style="width:12%"><col style="width:10%">'
-        '</colgroup><thead><tr>'
-        "<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th>Opened</th><th>Age</th><th>Assignee</th><th>Current status</th>"
-        f"</tr></thead><tbody>{open_rows}</tbody></table></div>"
-        f'<h3 style="font-size:13px;margin:20px 0 9px;font-weight:680;">Closed this week ({d["closed_count"]:,}) — selected</h3>'
-        '<div class="tbl-wrap"><table class="incident-table">'
-        f'{_table_cols([8, 9, 11, 34, 11, 14, 13])}<thead><tr>'
-        '<th>Ref</th><th>Type</th><th>Severity</th><th>Summary</th><th>Source</th><th>Assignee</th><th class="r">Time to close</th>'
-        f"</tr></thead><tbody>{closed_rows}</tbody></table></div></section>"
+        + "</section>"
     )
 
 
@@ -464,6 +477,68 @@ def _endpoint(d: Dict[str, Any], n: int = 4) -> str:
     )
 
 
+def _agent_status(d: Dict[str, Any], n: int = 5) -> str:
+    agent = d.get("agent_status") or {}
+    head = _sec_head(f"{n:02d} · Agent health", "Agent status", "Wazuh agent heartbeat snapshot")
+    if agent.get("unavailable") or not agent:
+        return (
+            "<section>" + head
+            + '<div class="card"><p class="caption" style="margin:0;">'
+              "Agent heartbeat data was unavailable for this report run.</p></div></section>"
+        )
+
+    total = int(agent.get("total", 0) or 0)
+    active = int(agent.get("active", 0) or 0)
+    inactive = int(agent.get("inactive", 0) or 0)
+    dashboard = str(agent.get("dashboard_url") or "")
+    tiles = (
+        _tile("blue", "Agents in scope", f"{total:,}", "seen within the last 14 days", href=dashboard, link_label="View agents")
+        + _tile("green", "Active agents", f"{active:,}", "heartbeat within 24h", href=dashboard, link_label="View agents")
+        + _tile("amber", "Inactive agents", f"{inactive:,}", "no heartbeat for more than 24h", href=dashboard, link_label="View agents")
+        + _tile("red", "Inactive 7-14 days", f'{int(agent.get("inactive_7_14d", 0) or 0):,}', "oldest included status group", href=dashboard, link_label="View agents")
+    )
+    health_kind = _stat_cls(0 if total == 0 else active / total * 100)
+    meters = [
+        ["Active within 24h", active, total, health_kind],
+        ["Inactive 24-72h", int(agent.get("inactive_24_72", 0) or 0), total, "warn"],
+        ["Inactive 3-7d", int(agent.get("inactive_3_7d", 0) or 0), total, "bad"],
+        ["Inactive 7-14d", int(agent.get("inactive_7_14d", 0) or 0), total, "bad"],
+    ]
+    attention = ""
+    if agent.get("inactive_agents"):
+        rows = []
+        for item in agent["inactive_agents"]:
+            name = esc(item.get("name") or "Unknown")
+            if dashboard:
+                name = f'<a href="{esc(dashboard)}">{name}</a>'
+            rows.append(
+                "<tr>"
+                f"<td>{name}</td><td>{esc(item.get('id') or '-')}</td>"
+                f"<td>{esc(item.get('os') or 'Unknown')}</td>"
+                f'<td class="num-cell">{esc(item.get("last_seen") or "-")}</td>'
+                f'<td class="num-cell">{esc(item.get("inactive") or "-")}</td>'
+                f"<td>{esc(item.get('category') or 'Inactive')}</td></tr>"
+            )
+        if agent.get("inactive_more", 0):
+            rows.append(
+                f'<tr><td colspan="6" class="subtle" style="text-align:center;">'
+                f'+ {int(agent["inactive_more"]):,} additional inactive agents</td></tr>'
+            )
+        attention = (
+            '<div class="tbl-wrap" style="margin-top:16px;"><div class="callout-h">'
+            f'Agents needing attention ({inactive:,})</div><table>{_table_cols([18, 8, 22, 20, 12, 20])}'
+            '<thead><tr><th>Agent</th><th>ID</th><th>Host OS</th><th>Last seen</th>'
+            f'<th>Inactive</th><th>Status group</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+        )
+    return (
+        "<section>" + head + '<div class="tiles t4" style="margin-bottom:16px;">' + tiles + "</div>"
+        '<div class="card"><p class="card-h">Heartbeat status</p>'
+        '<p class="caption" style="margin:2px 0 10px;">Active means the agent reported within 24 hours. '
+        "Agents last seen more than 14 days ago are excluded.</p>"
+        + _meters(meters) + _metric_cta(dashboard, "View agent details") + "</div>" + attention + "</section>"
+    )
+
+
 def _vuln(d: Dict[str, Any], n: int = 5) -> str:
     v = d.get("vuln")
     head = _sec_head(
@@ -474,11 +549,12 @@ def _vuln(d: Dict[str, Any], n: int = 5) -> str:
         return "<section>" + head + _pending("Athena scanning") + "</section>"
     crit_cap = v.get("critical_note") or ("none open" if v["crit_open"] == 0 else "across the estate")
     high_cap = v.get("high_note") or ("none open" if v["high_open"] == 0 else "across the estate")
+    links = v.get("links", {})
     tiles = (
-        _tile("red", "Critical open", f'{v["crit_open"]:,}', crit_cap) +
-        _tile("amber", "High open", f'{v["high_open"]:,}', high_cap) +
-        _tile("green", "Resolved this week", f'{v["resolved"]:,}', v["resolved_delta"]) +
-        _tile("blue", "Newly detected", f'{v["new"]:,}', f'net <b>{v["net"]:+,}</b> open')
+        _tile("red", "Critical open", f'{v["crit_open"]:,}', crit_cap, href=links.get("critical", "")) +
+        _tile("amber", "High open", f'{v["high_open"]:,}', high_cap, href=links.get("high", "")) +
+        _tile("green", "Resolved this week", f'{v["resolved"]:,}', v["resolved_delta"], href=links.get("resolved", "")) +
+        _tile("blue", "Newly detected", f'{v["new"]:,}', f'net <b>{v["net"]:+,}</b> open', href=links.get("new", ""))
     )
     sev_rows = [(lbl, val, SEV_CLASS[lbl]) for lbl, val in v["severity"]]
     crit_rows = "".join(f'<tr><td><a href="{esc(u)}">{esc(c)}</a></td><td class="r cnt-crit">{esc(x)}</td></tr>' for c, u, x in v.get("top_crit", []))
@@ -496,14 +572,14 @@ def _vuln(d: Dict[str, Any], n: int = 5) -> str:
             '<div class="card" style="margin-top:16px;"><p class="card-h">Remediation SLA attainment</p>'
             '<p class="caption" style="margin:2px 0 10px;">Share remediated within target time, by severity '
             '<span class="subtle">— green ≥ 95%, amber ≥ 80%, red below</span></p>'
-            + _sla_meters(sla["rows"]) + overall_line + "</div>"
+            + _sla_meters(sla["rows"]) + overall_line + _metric_cta(links.get("sla", "")) + "</div>"
         )
     return (
         "<section>" + head +
         '<div class="tiles t4" style="margin-bottom:16px;">' + tiles + "</div>"
         '<div class="grid2"><div class="card"><p class="card-h">Open vulnerabilities by severity</p>'
         f'<p class="caption" style="margin:2px 0 6px;">{v["total_open"]:,} open across the estate</p>'
-        f'<div class="chart-fill">{hbar_svg(sev_rows)}</div></div>'
+        f'<div class="chart-fill">{hbar_svg(sev_rows)}</div>{_metric_cta(links.get("severity", ""))}</div>'
         '<div class="tbl-wrap"><div style="display:grid;grid-template-columns:1fr 1fr;">'
         f'<div class="cvebar crit">Top Critical CVEs · {v["crit_open"]:,} open</div>'
         f'<div class="cvebar high">Top High CVEs · {v["high_open"]:,} open</div></div>'
@@ -583,6 +659,8 @@ def render_report(data: Dict[str, Any], css: Optional[str] = None) -> str:
         body += _device(data, nxt())
     if sections.get("endpoint", True):
         body += _endpoint(data, nxt())
+    if sections.get("agent_status", True):
+        body += _agent_status(data, nxt())
     if sections.get("vuln", True):
         body += _vuln(data, nxt())
     if sections.get("availability", True):
