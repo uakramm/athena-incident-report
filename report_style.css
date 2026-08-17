@@ -59,6 +59,14 @@ section { margin:0 0 28px; }
 .caption { color:var(--muted); font-size:12px; margin:12px 2px 0; }
 .caption b { color:var(--ink-2); }
 
+/* Week summary line paired with the button to its Jira ticket list. */
+.summary-row { display:flex; align-items:center; justify-content:space-between;
+  gap:16px; flex-wrap:wrap; margin:14px 2px 0; }
+.btn-jira { display:inline-flex; align-items:center; background:var(--brand); color:#fff;
+  font-size:12px; font-weight:700; padding:9px 15px; border-radius:8px; text-decoration:none;
+  white-space:nowrap; box-shadow:var(--shadow); }
+.btn-jira:hover { background:var(--brand-2); filter:brightness(1.1); }
+
 .comment { background:var(--paper); border:1px solid var(--line); border-left:4px solid var(--brand);
   border-radius:12px; padding:16px 20px; box-shadow:var(--shadow); }
 .comment-h { display:flex; align-items:baseline; gap:12px; margin-bottom:6px; }
@@ -174,5 +182,7 @@ td .sum{ color:var(--ink); }
   .note{ display:none !important; }
   section{ break-inside:avoid; }
   .tbl-wrap,.card,.tile,.metaline{ box-shadow:none; }
+  /* outlined, so it survives a print with background graphics off */
+  .btn-jira{ background:#fff; color:var(--brand); border:1px solid var(--brand); box-shadow:none; }
   @page{ margin:13mm; }
 }

@@ -1443,8 +1443,16 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     opened_incident_jql = incidents_only(opened(INC_TYPES, start, end))
     closed_incident_jql = incidents_only(closed(INC_TYPES, start, end))
     open_incident_jql = incidents_only(open_at(INC_TYPES, end))
+    # Everything the week touched: raised in the period, or resolved in it after
+    # being raised earlier — the ticket list behind the week's summary line.
+    week_incident_jql = incidents_only(scoped(
+        INC_TYPES,
+        f'((created >= "{d(start)}" AND created < "{d(end)}") '
+        f'OR (resolutiondate >= "{d(start)}" AND resolutiondate < "{d(end)}"))',
+    )) + " ORDER BY created DESC"
     incident_links = {
         "opened": jira_search_url(cli, opened_incident_jql),
+        "week": jira_search_url(cli, week_incident_jql),
         "closed": jira_search_url(cli, closed_incident_jql),
         "open": jira_search_url(cli, open_incident_jql),
         "lifecycle_opened": jira_search_url(cli, opened_incident_jql),
@@ -1941,7 +1949,7 @@ def sample_data() -> Dict[str, Any]:
     jira_filter = "https://example.atlassian.net/issues/?jql=project%3DNSO"
     incident_links = {
         key: jira_filter for key in (
-            "opened", "closed", "open", "lifecycle_opened", "lifecycle_closed",
+            "opened", "closed", "open", "week", "lifecycle_opened", "lifecycle_closed",
             "severity", "trend", "type", "sla",
         )
     }

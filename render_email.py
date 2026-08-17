@@ -208,6 +208,19 @@ def _link_cta(href: str, label: str = "View in Jira") -> str:
     )
 
 
+def _button(href: str, label: str) -> str:
+    """Filled CTA button — a one-cell table, so Outlook keeps the fill and radius."""
+    if not href:
+        return ""
+    return (
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right">'
+        f'<tr><td bgcolor="{BRAND}" align="center" style="border-radius:8px;">'
+        f'<a href="{esc(href)}" style="{FONT}display:inline-block;font-size:12px;font-weight:bold;'
+        f'color:#ffffff;text-decoration:none;padding:10px 16px;white-space:nowrap;">'
+        f'{esc(label)} &rarr;</a></td></tr></table>'
+    )
+
+
 def _tile(
     kind: str, label: str, num: str, delta_html: str, small: bool = False,
     href: str = "", link_label: str = "View in Jira", show_cta: bool = True,
@@ -564,10 +577,17 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
                            "Share resolved within target time, by severity — green &ge; 95%, amber &ge; 80%, red below",
                            body, top=16))
 
-    if d.get("inc_summary_line"):
+    week_href = links.get("week") or links.get("opened", "")
+    if d.get("inc_summary_line") or week_href:
+        summary = (f'<div style="{FONT}font-size:12px;color:{MUTED};">'
+                   f'{_inline(d.get("inc_summary_line", ""))}</div>')
+        button = _button(week_href, "View this week's tickets in Jira")
         parts.append(
-            f'<div style="{FONT}font-size:12px;color:{MUTED};padding:14px 2px 0;">'
-            f'{_inline(d["inc_summary_line"])}</div>'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+            'style="margin-top:14px;"><tr>'
+            f'<td valign="middle" style="padding:0 12px 0 2px;">{summary}</td>'
+            f'<td align="right" valign="middle" width="230">{button}</td>'
+            '</tr></table>'
         )
     return "".join(parts)
 

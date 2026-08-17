@@ -201,6 +201,16 @@ def _pill(sev_class: str, label: str) -> str:
     return f'<span class="pill {sev_class}">{esc(label)}</span>'
 
 
+# Ticket-stack glyph for the Jira button (currentColor, so it inherits the fill).
+_JIRA_MARK = (
+    '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" '
+    'style="vertical-align:-2px;margin-right:6px;">'
+    '<rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" stroke-width="1.6"/>'
+    '<path d="M5 6.5h6M5 9.5h3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>'
+    '</svg>'
+)
+
+
 def _metric_cta(href: str, label: str = "View in Jira") -> str:
     if not href:
         return ""
@@ -400,6 +410,20 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
         extra += f'<div style="margin-top:16px;">{type_card}</div>'
     if sla_card:
         extra += f'<div style="margin-top:16px;">{sla_card}</div>'
+    # Week summary line, with the ticket list it describes one click away.
+    summary_line = d.get("inc_summary_line", "")
+    week_href = links.get("week") or links.get("opened", "")
+    summary = ""
+    if summary_line or week_href:
+        button = (
+            f'<a class="btn-jira" href="{esc(week_href)}">'
+            f'{_JIRA_MARK}View this week&rsquo;s tickets in Jira &rarr;</a>'
+            if week_href else ""
+        )
+        summary = (
+            '<div class="summary-row">'
+            f'<p class="caption" style="margin:0;">{summary_line}</p>{button}</div>'
+        )
     return (
         "<section>" + _sec_head(
             f"{n:02d} · Detection & response", "Incident management",
@@ -415,8 +439,7 @@ def _incidents(d: Dict[str, Any], n: int = 2) -> str:
         '<p class="caption" style="margin:2px 0 6px;">Opened, closed &amp; still-open per week</p>'
         + status_legend + f'<div class="chart-fill">{lines_svg(d["trend"], status_series, "Opened, closed and open per week")}</div>'
         + '</div></div>'
-        + sev_card + extra +
-        f'<p class="caption">{d.get("inc_summary_line", "")}</p>'
+        + sev_card + extra + summary
         + "</section>"
     )
 
