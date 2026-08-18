@@ -829,6 +829,81 @@ def _availability(d: Dict[str, Any], n: int = 6) -> str:
     return head + _tile_grid(tiles, 4)
 
 
+_SOC2_STATUS = {  # status -> (background, text colour, label)
+    "met": ("#eafaf0", "#137a41", "✓ Met"),
+    "attention": ("#fdf4e6", "#b1660a", "△ Attention"),
+    "none": (PANEL, MUTED, "Not evidenced"),
+}
+
+
+def _soc2_status_pill(status: str) -> str:
+    bg, tx, label = _SOC2_STATUS.get(status, _SOC2_STATUS["none"])
+    return (f'<span style="{FONT}font-size:11px;font-weight:bold;color:{tx};background:{bg};'
+            f'padding:2px 8px;border-radius:10px;white-space:nowrap;">{esc(label)}</span>')
+
+
+def _soc2(d: Dict[str, Any], n: int = 7) -> str:
+    compliance = d.get("soc2") or {}
+    head = _sec_head(
+        f"{n:02d} · Compliance monitoring",
+        "SOC 2 Compliance Status",
+        d.get("soc2_src", "Wazuh · Trust Services Criteria (TSC) monitoring"),
+        compliance.get("dashboard_url", ""),
+        "View monitoring evidence",
+    )
+    disclaimer = (
+        "Operational monitoring evidence only; this is not an audit opinion, "
+        "attestation, or certification status."
+    )
+    criteria = compliance.get("criteria") or []
+    if not criteria:
+        body = (
+            f'<div style="{FONT}font-size:12px;color:{INK2};">The report could not read '
+            "the control evidence for this period.</div>"
+            f'<div style="{FONT}font-size:11.5px;color:{MUTED};padding-top:10px;">{esc(disclaimer)}</div>'
+        )
+        return head + _card("SOC 2 monitoring data unavailable", "", body)
+
+    met = sum(1 for row in criteria if row.get("status") == "met")
+    needs_attention = sum(1 for row in criteria if row.get("status") == "attention")
+    headline = f"Controls evidenced this period — {met} of {len(criteria)} met"
+    if needs_attention:
+        headline += f", {needs_attention} needing attention"
+    cell = f"{FONT}font-size:12px;padding:9px 10px;border-bottom:1px solid {LINE};vertical-align:top;"
+    th = (f"{FONT}font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:{MUTED};"
+          f"font-weight:bold;padding:8px 10px;border-bottom:1px solid {LINE};")
+    body_rows = "".join(
+        f'<tr><td style="{cell}color:{LINK};font-weight:bold;white-space:nowrap;">{esc(row.get("criterion", ""))}</td>'
+        f'<td style="{cell}color:{INK};">{esc(row.get("control", ""))}</td>'
+        f'<td style="{cell}">{_soc2_status_pill(row.get("status", ""))}</td>'
+        f'<td style="{cell}color:{INK2};line-height:1.5;">{esc(row.get("evidence", ""))}</td></tr>'
+        for row in criteria
+    )
+    table = (
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{PAPER}" '
+        f'style="border:1px solid {LINE};border-top:none;border-radius:0 0 10px 10px;border-collapse:collapse;'
+        'table-layout:fixed;">'
+        f'<tr><td width="9%" style="{th}">Criterion</td><td width="26%" style="{th}">Control</td>'
+        f'<td width="14%" style="{th}">Status</td><td style="{th}">Evidence (this period)</td></tr>'
+        f"{body_rows}</table>"
+    )
+    banner = (
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{BRAND}" '
+        'style="border-radius:10px 10px 0 0;"><tr><td style="padding:8px 14px;">'
+        f'<div style="{FONT}font-size:11.5px;font-weight:bold;color:{BRAND_INK};">{esc(headline)}</div>'
+        "</td></tr></table>"
+    )
+    mapped = ", ".join(
+        f"{esc(control)} ({int(count or 0):,})" for control, count in compliance.get("top_controls", [])
+    )
+    mapped_line = (
+        f'<div style="{FONT}font-size:11.5px;color:{MUTED};padding:12px 2px 0;">Most active TSC control '
+        f"mappings in this period&rsquo;s alerts: {mapped}.</div>" if mapped else ""
+    )
+    note = f'<div style="{FONT}font-size:11.5px;color:{MUTED};padding:10px 2px 0;">{esc(disclaimer)}</div>'
+    return head + banner + table + mapped_line + note
+
+
 def _footer(d: Dict[str, Any]) -> str:
     email = d.get("support_email", "")
     defs = [
@@ -882,6 +957,8 @@ def render_email(data: Dict[str, Any]) -> str:
         body.append(_vuln(data, nxt()))
     if sections.get("availability", True):
         body.append(_availability(data, nxt()))
+    if sections.get("soc2", True):
+        body.append(_soc2(data, nxt()))
     body.append(_footer(data))
     inner = "".join(body)
     return (

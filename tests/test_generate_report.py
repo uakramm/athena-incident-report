@@ -101,6 +101,163 @@ class AgentStatusTests(unittest.TestCase):
         self.assertTrue(session.closed)
 
 
+class Soc2ComplianceTests(unittest.TestCase):
+    def test_snapshot_aggregates_tsc_mapped_alerts(self) -> None:
+        class Client:
+            def query_index(self, index: str, body: dict) -> dict:
+                self.index = index
+                self.body = body
+                return {
+                    "hits": {"total": {"value": 21}},
+                    "aggregations": {
+                        "unique_controls": {"value": 4},
+                        "affected_agents": {"value": 3},
+                        "top_controls": {
+                            "buckets": [
+                                {"key": "CC6.1", "doc_count": 9},
+                                {"key": "CC7.2", "doc_count": 5},
+                            ]
+                        },
+                        "severity": {
+                            "buckets": [
+                                {"key": "Low", "doc_count": 10},
+                                {"key": "Medium", "doc_count": 6},
+                                {"key": "High", "doc_count": 4},
+                                {"key": "Critical", "doc_count": 1},
+                            ]
+                        },
+                    },
+                }
+
+        client = Client()
+        result = generate_report.soc2_compliance_snapshot(
+            client, dt.date(2026, 8, 3), dt.date(2026, 8, 10)
+        )
+
+        self.assertEqual(client.index, "wazuh-alerts-*")
+        filters = client.body["query"]["bool"]["filter"]
+        self.assertIn({"exists": {"field": "rule.tsc"}}, filters)
+        self.assertIn(
+            {"range": {"timestamp": {"gte": "2026-08-03", "lt": "2026-08-10"}}},
+            filters,
+        )
+        self.assertEqual(result["total_alerts"], 21)
+        self.assertEqual(result["critical_high"], 5)
+        self.assertEqual(result["unique_controls"], 4)
+        self.assertEqual(result["affected_agents"], 3)
+        self.assertEqual(result["status"], "Attention required")
+        self.assertEqual(result["severity"][0], ("Critical", 1))
+        self.assertEqual(result["top_controls"][0], ("CC6.1", 9))
+
+    def test_snapshot_reports_no_mapped_alerts_without_claiming_compliance(self) -> None:
+        class Client:
+            def query_index(self, _index: str, _body: dict) -> dict:
+                return {"hits": {"total": 0}, "aggregations": {}}
+
+        result = generate_report.soc2_compliance_snapshot(
+            Client(), dt.date(2026, 8, 3), dt.date(2026, 8, 10)
+        )
+
+        self.assertEqual(result["status"], "No mapped alerts")
+        self.assertEqual(result["status_kind"], "green")
+        self.assertNotIn("compliant", result["status_note"].lower())
+
+
+class Soc2CriteriaTests(unittest.TestCase):
+    def _data(self, **overrides: dict) -> dict:
+        data = {
+            "_sections_enabled": {"agent_status": True, "vuln": True, "availability": True, "soc2": True},
+            "exec": {"opened": 100, "closed": 96, "open": 4, "mttd": "14 min", "mttt": "2 min", "mttc": "3h 42m"},
+            "sla": {"met": 98, "total": 100, "overall": 98},
+            "soc2": {"total_alerts": 42, "critical_high": 3, "unique_controls": 8, "affected_agents": 12},
+            "agent_status": {"total": 84, "active": 82},
+            "vuln": {"total_open": 271, "crit_open": 4, "high_open": 31, "resolved": 47,
+                     "sla": {"overall": 97}},
+            "availability": {"uptime": "99.98%", "sla": "99.9%", "outages": 0},
+        }
+        data.update(overrides)
+        return data
+
+    def _row(self, rows: list, control_starts_with: str) -> dict:
+        return next(r for r in rows if r["control"].startswith(control_starts_with))
+
+    def test_a_clean_week_evidences_every_criterion(self) -> None:
+        rows = generate_report.soc2_criteria(self._data())
+
+        self.assertEqual([r["criterion"] for r in rows],
+                         ["CC7.1", "CC7.1", "CC7.2", "CC7.3", "CC7.4", "CC7.5", "A1.2"])
+        self.assertTrue(all(r["status"] == generate_report.SOC2_MET for r in rows), rows)
+
+    def test_detection_stays_met_when_it_surfaces_critical_alerts(self) -> None:
+        rows = generate_report.soc2_criteria(self._data())
+        detection = self._row(rows, "Threat")
+
+        self.assertEqual(detection["status"], generate_report.SOC2_MET)
+        self.assertIn("3 at critical/high Wazuh rule level", detection["evidence"])
+
+    def test_sla_miss_and_monitoring_gap_are_flagged_for_attention(self) -> None:
+        rows = generate_report.soc2_criteria(self._data(
+            sla={"met": 80, "total": 100, "overall": 80},
+            agent_status={"total": 84, "active": 60},
+        ))
+
+        self.assertEqual(self._row(rows, "Incident response")["status"], generate_report.SOC2_ATTENTION)
+        monitoring = self._row(rows, "Continuous")
+        self.assertEqual(monitoring["status"], generate_report.SOC2_ATTENTION)
+        self.assertIn("60 of 84 agents reporting within 24h (71%)", monitoring["evidence"])
+
+    def test_recovery_tracks_closure_rate_not_an_empty_queue(self) -> None:
+        rows = generate_report.soc2_criteria(self._data(
+            exec={"opened": 100, "closed": 95, "open": 17, "mttc": "3h"},
+        ))
+
+        recovery = self._row(rows, "Incident resolution")
+        self.assertEqual(recovery["status"], generate_report.SOC2_MET)
+        self.assertIn("17 open at the reporting cut-off", recovery["evidence"])
+
+    def test_open_exposure_with_no_remediation_is_not_a_pass(self) -> None:
+        rows = generate_report.soc2_criteria(self._data(
+            vuln={"total_open": 545, "crit_open": 13, "high_open": 532, "resolved": 0, "sla": {}},
+        ))
+
+        vulnerability = self._row(rows, "Vulnerability")
+        self.assertEqual(vulnerability["status"], generate_report.SOC2_ATTENTION)
+        self.assertIn("none remediated this period", vulnerability["evidence"])
+
+    def test_nothing_open_and_nothing_to_remediate_is_met(self) -> None:
+        rows = generate_report.soc2_criteria(self._data(
+            vuln={"total_open": 0, "crit_open": 0, "high_open": 0, "resolved": 0, "sla": {}},
+        ))
+
+        self.assertEqual(self._row(rows, "Vulnerability")["status"], generate_report.SOC2_MET)
+
+    def test_unreadable_sources_are_not_evidenced_rather_than_passed(self) -> None:
+        rows = generate_report.soc2_criteria(self._data(
+            soc2={"unavailable": True},
+            agent_status={"unavailable": True},
+            sla={},
+        ))
+
+        for control in ("Threat", "Continuous", "Incident response"):
+            self.assertEqual(self._row(rows, control)["status"], generate_report.SOC2_NO_DATA)
+        self.assertNotIn("Met", [r["status"] for r in rows if r["control"].startswith("Threat")])
+
+    def test_disabled_sections_are_left_out_entirely(self) -> None:
+        rows = generate_report.soc2_criteria(self._data(
+            _sections_enabled={"agent_status": False, "vuln": False, "availability": False, "soc2": True},
+        ))
+
+        self.assertEqual([r["criterion"] for r in rows], ["CC7.1", "CC7.3", "CC7.4", "CC7.5"])
+
+    def test_targets_are_env_tunable(self) -> None:
+        data = self._data(sla={"met": 90, "total": 100, "overall": 90})
+
+        with mock.patch.dict(os.environ, {"REPORT_SOC2_SLA_TARGET_PCT": "90"}):
+            rows = generate_report.soc2_criteria(data)
+
+        self.assertEqual(self._row(rows, "Incident response")["status"], generate_report.SOC2_MET)
+
+
 class IncidentSeverityTests(unittest.TestCase):
     def test_standard_sev_2_is_high(self) -> None:
         fields = {"summary": "[HIGH] [Office 365] Suspicious email", "severity": {"value": "Sev-2"}}

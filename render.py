@@ -629,6 +629,74 @@ def _availability(d: Dict[str, Any], n: int = 6) -> str:
     return "<section>" + head + '<div class="tiles t4">' + tiles + "</div></section>"
 
 
+# Criterion status → (pill class, label). 'none' stays deliberately plain: the
+# report says it has no evidence rather than colouring it as a pass or a fail.
+_SOC2_STATUS = {
+    "met": ("good", "✓ Met"),
+    "attention": ("high", "△ Attention"),
+    "none": ("", "Not evidenced"),
+}
+
+
+def _soc2_status_pill(status: str) -> str:
+    cls, label = _SOC2_STATUS.get(status, _SOC2_STATUS["none"])
+    return _pill(cls, label) if cls else f'<span class="tag">{esc(label)}</span>'
+
+
+def _soc2(d: Dict[str, Any], n: int = 7) -> str:
+    compliance = d.get("soc2") or {}
+    head = _sec_head(
+        f"{n:02d} · Compliance monitoring",
+        "SOC 2 Compliance Status",
+        d.get("soc2_src", "Wazuh · Trust Services Criteria (TSC) monitoring"),
+        compliance.get("dashboard_url", ""),
+        "View monitoring evidence",
+    )
+    disclaimer = (
+        "Operational monitoring evidence only; this is not an audit opinion, "
+        "attestation, or certification status."
+    )
+    criteria = compliance.get("criteria") or []
+    if not criteria:
+        return (
+            "<section>" + head + '<div class="card"><p class="card-h">SOC 2 monitoring data unavailable</p>'
+            '<p class="caption" style="margin:4px 0 0;">The report could not read the control evidence for this period.</p>'
+            f'<p class="caption" style="margin:10px 0 0;">{esc(disclaimer)}</p></div></section>'
+        )
+
+    rows = "".join(
+        f'<tr><td><span class="id">{esc(row.get("criterion", ""))}</span></td>'
+        f'<td class="sum">{esc(row.get("control", ""))}</td>'
+        f'<td>{_soc2_status_pill(row.get("status", ""))}</td>'
+        f'<td class="soc2-evidence">{esc(row.get("evidence", ""))}</td></tr>'
+        for row in criteria
+    )
+    met = sum(1 for row in criteria if row.get("status") == "met")
+    needs_attention = sum(1 for row in criteria if row.get("status") == "attention")
+    headline = f"Controls evidenced this period — {met} of {len(criteria)} met"
+    if needs_attention:
+        headline += f", {needs_attention} needing attention"
+    # The Wazuh control mappings sit under the table as supporting detail: they are
+    # the alerts' own TSC tags, not the criteria the rows above are judged on.
+    mapped = ", ".join(
+        f"{esc(control)} ({int(count or 0):,})" for control, count in compliance.get("top_controls", [])
+    )
+    mapped_line = (
+        f'<p class="caption" style="margin-top:12px;">Most active TSC control mappings in this '
+        f"period&rsquo;s alerts: {mapped}.</p>" if mapped else ""
+    )
+    return (
+        "<section>" + head +
+        '<div class="tbl-wrap soc2-criteria">'
+        f'<div class="callout-h blue">{esc(headline)}</div>'
+        f'<table>{_table_cols([10, 27, 13, 50])}'
+        '<thead><tr><th>Criterion</th><th>Control</th><th>Status</th>'
+        '<th>Evidence (this period)</th></tr></thead>'
+        f"<tbody>{rows}</tbody></table></div>" + mapped_line +
+        f'<p class="caption">{esc(disclaimer)}</p></section>'
+    )
+
+
 def _pending(source: str) -> str:
     return (
         '<div class="card"><p class="caption" style="margin:0;">Provided separately from '
@@ -688,8 +756,10 @@ def render_report(data: Dict[str, Any], css: Optional[str] = None) -> str:
         body += _vuln(data, nxt())
     if sections.get("availability", True):
         body += _availability(data, nxt())
+    if sections.get("soc2", True):
+        body += _soc2(data, nxt())
     body += _footer(data)
     return (
-        "<title>Weekly Security Operations Report</title>\n"
+        '<meta charset="utf-8">\n<title>Weekly Security Operations Report</title>\n'
         f"<style>{css}</style>\n<div class=\"wrap\">{body}</div>\n"
     )

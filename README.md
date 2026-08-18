@@ -5,9 +5,10 @@ This tool builds the weekly security report from the tenant's OpenSearch
 the Pallas sync service mirrors its latest ticket state into this index.
 
 The report includes summary-level incident metrics with Jira drill-down links,
-an Agent Status section sourced from the Wazuh Manager API, and vulnerability
-metrics. It intentionally omits the long open/closed ticket tables; users can
-open the filtered Jira result behind each metric when they need ticket detail.
+an Agent Status section sourced from the Wazuh Manager API, vulnerability
+metrics, and a SOC 2 Compliance Status section based on Wazuh TSC mappings. It
+intentionally omits the long open/closed ticket tables; users can open the
+filtered Jira result behind each metric when they need ticket detail.
 
 Agent Status follows the existing Agent Summary definition: an agent is active
 when it reported within 24 hours, inactive agents are grouped into 24-72 hours,
@@ -15,6 +16,36 @@ when it reported within 24 hours, inactive agents are grouped into 24-72 hours,
 Configure `WAZUH_HOST`, `WAZUH_USER`, `WAZUH_PASS`, and `WAZUH_VERIFY_SSL` in
 the tenant env file. `WAZUH_PORT` defaults to `55000`. The optional
 `REPORT_AGENT_STATUS_URL` controls the report's agent-detail link.
+
+SOC 2 Compliance Status states, criterion by criterion, what the SOC did for the
+client this week and what the week's own numbers show. Each row is marked *Met*
+when the control operated with no exception in the data, *Attention* when it
+operated but the numbers show a gap, and *Not evidenced* when the source was
+enabled but had nothing to read — a source that failed is never reported as a
+pass. Rows whose section is switched off are omitted rather than guessed at. It
+is operational evidence of SOC activity, not an audit opinion, attestation, or
+certification status.
+
+| Criterion | Control | Evidence |
+| --- | --- | --- |
+| CC7.1 | Threat and anomaly detection | TSC-mapped alerts (`rule.tsc` from `wazuh-alerts-*`), controls and agents they cover |
+| CC7.1 | Vulnerability identification and remediation | open and remediated counts, remediation SLA attainment |
+| CC7.2 | Continuous security monitoring | agents reporting within 24h, from the Wazuh Manager heartbeat |
+| CC7.3 | Security event evaluation and ticketing | incidents raised and triaged, MTTD and MTTT |
+| CC7.4 | Incident response within SLA | severity SLA attainment for incidents resolved this week |
+| CC7.5 | Incident resolution and recovery | closure rate, backlog at the cut-off, MTTC |
+| A1.2 | Monitored system availability | uptime against target and outages (needs the availability section) |
+
+Detection stays *Met* when it surfaces critical alerts — finding them is the
+control working; the response to them is judged by CC7.3 and CC7.4.
+
+Configure `OPENSEARCH_ALERT_INDEX` when a tenant uses a different Wazuh alert
+index. Set `REPORT_ENABLE_SOC2_COMPLIANCE=false` to omit the section, and
+optionally set `REPORT_SOC2_COMPLIANCE_URL` to link to the detailed evidence
+dashboard. The *Met* thresholds default to 95% for SLA attainment
+(`REPORT_SOC2_SLA_TARGET_PCT`, matching the report's own green SLA band), 95%
+for monitoring coverage (`REPORT_SOC2_COVERAGE_TARGET_PCT`), and a 90% closure
+rate (`REPORT_SOC2_CLOSURE_TARGET_PCT`).
 
 ## First-time setup (only once)
 

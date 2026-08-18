@@ -138,6 +138,10 @@ svg { display:block; width:100%; height:auto; }
 .txt-ok{ color:var(--good-ink); } .txt-warn{ color:var(--high-ink); } .txt-bad{ color:var(--crit-ink); }
 
 .tbl-wrap{ overflow-x:auto; border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); background:var(--paper); }
+.tbl-wrap.soc2-criteria{ overflow:hidden; }
+.soc2-criteria table{ min-width:0; table-layout:fixed; }
+.soc2-criteria td{ vertical-align:top; }
+.soc2-criteria td.soc2-evidence{ color:var(--ink-2); }
 table{ width:100%; border-collapse:collapse; font-size:12.5px; min-width:640px; }
 thead th{ text-align:left; font-size:10px; letter-spacing:0.06em; text-transform:uppercase; color:var(--muted);
   font-weight:700; padding:11px 14px; border-bottom:1px solid var(--line); background:var(--panel); white-space:nowrap; }

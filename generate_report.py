@@ -86,6 +86,7 @@ def section_enablement() -> Dict[str, bool]:
         "agent_status": _env_bool("REPORT_ENABLE_AGENT_STATUS", True),
         "vuln": _env_bool("REPORT_ENABLE_VULNERABILITY_STATUS", True),
         "availability": _env_bool("REPORT_ENABLE_SYSTEM_AVAILABILITY", False),
+        "soc2": _env_bool("REPORT_ENABLE_SOC2_COMPLIANCE", True),
     }
 
 
@@ -1099,6 +1100,244 @@ def agent_status_snapshot(_cli: Any, now: Optional[dt.datetime] = None) -> Dict[
     }
 
 
+def soc2_compliance_snapshot(
+    cli: Any, start: dt.date, end: dt.date,
+) -> Dict[str, Any]:
+    """Summarize Wazuh alerts mapped to SOC 2 Trust Services Criteria.
+
+    This is operational monitoring evidence, not an audit opinion. A single
+    alert can map to multiple TSC controls, so control bucket counts can exceed
+    the number of alert documents.
+    """
+    index = _env("OPENSEARCH_ALERT_INDEX", "wazuh-alerts-*") or "wazuh-alerts-*"
+    body = {
+        "size": 0,
+        "track_total_hits": True,
+        "query": {
+            "bool": {
+                "filter": [
+                    {"range": {"timestamp": {"gte": start.isoformat(), "lt": end.isoformat()}}},
+                    {"exists": {"field": "rule.tsc"}},
+                ]
+            }
+        },
+        "aggs": {
+            "unique_controls": {"cardinality": {"field": "rule.tsc"}},
+            "top_controls": {"terms": {"field": "rule.tsc", "size": 6}},
+            "affected_agents": {"cardinality": {"field": "agent.name"}},
+            "severity": {
+                "range": {
+                    "field": "rule.level",
+                    "ranges": [
+                        {"key": "Low", "to": 7},
+                        {"key": "Medium", "from": 7, "to": 12},
+                        {"key": "High", "from": 12, "to": 15},
+                        {"key": "Critical", "from": 15},
+                    ],
+                }
+            },
+        },
+    }
+    response = cli.query_index(index, body)
+    hits_total = ((response.get("hits") or {}).get("total") or 0)
+    if isinstance(hits_total, dict):
+        hits_total = hits_total.get("value", 0)
+    aggs = response.get("aggregations") or {}
+    severity_buckets = {
+        str(bucket.get("key")): int(bucket.get("doc_count", 0) or 0)
+        for bucket in ((aggs.get("severity") or {}).get("buckets") or [])
+        if isinstance(bucket, dict)
+    }
+    severity = [
+        (label, severity_buckets.get(label, 0))
+        for label in ("Critical", "High", "Medium", "Low")
+    ]
+    critical_high = severity_buckets.get("Critical", 0) + severity_buckets.get("High", 0)
+    total_alerts = int(hits_total or 0)
+    if critical_high:
+        status, status_kind = "Attention required", "red"
+        status_note = f"{critical_high:,} critical/high TSC-mapped alerts require review."
+    elif total_alerts:
+        status, status_kind = "Monitoring", "amber"
+        status_note = "TSC-mapped activity was recorded with no critical/high alerts."
+    else:
+        status, status_kind = "No mapped alerts", "green"
+        status_note = "No TSC-mapped alerts were recorded during this reporting period."
+    top_controls = [
+        (str(bucket.get("key") or "Unspecified"), int(bucket.get("doc_count", 0) or 0))
+        for bucket in ((aggs.get("top_controls") or {}).get("buckets") or [])
+        if isinstance(bucket, dict)
+    ]
+    return {
+        "status": status,
+        "status_kind": status_kind,
+        "status_note": status_note,
+        "total_alerts": total_alerts,
+        "critical_high": critical_high,
+        "unique_controls": int((aggs.get("unique_controls") or {}).get("value", 0) or 0),
+        "affected_agents": int((aggs.get("affected_agents") or {}).get("value", 0) or 0),
+        "severity": severity,
+        "top_controls": top_controls,
+        "dashboard_url": _env("REPORT_SOC2_COMPLIANCE_URL", ""),
+        "source": index,
+    }
+
+
+SOC2_MET, SOC2_ATTENTION, SOC2_NO_DATA = "met", "attention", "none"
+
+
+def _soc2_target(name: str, default: float) -> float:
+    try:
+        raw = _env(name, "")
+        return float(raw) if raw else float(default)
+    except ValueError:
+        return float(default)
+
+
+def _pct(value: str) -> Optional[float]:
+    """'99.98%' -> 99.98. None when the string is not a percentage."""
+    try:
+        return float(str(value).strip().rstrip("%"))
+    except (TypeError, ValueError):
+        return None
+
+
+def soc2_criteria(data: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Map the period's own metrics onto the TSC criteria they evidence.
+
+    Each row names a control, states what the week's data shows, and marks it
+    'met' when the control operated with no exception in the data, 'attention'
+    when it operated but the numbers show a gap, or 'none' when the source was
+    enabled but had nothing to read. Rows whose source section is switched off
+    are left out — the report never claims evidence it did not gather.
+
+    This is operational evidence of SOC activity, not an audit opinion: nothing
+    here asserts that a criterion is satisfied for attestation purposes.
+    """
+    sections = data.get("_sections_enabled", {})
+    exec_ = data.get("exec") or {}
+    sla = data.get("sla") or {}
+    compliance = data.get("soc2") or {}
+    agents = data.get("agent_status") or {}
+    vuln = data.get("vuln") or {}
+    availability = data.get("availability") or {}
+    sla_target = _soc2_target("REPORT_SOC2_SLA_TARGET_PCT", 95)
+    coverage_target = _soc2_target("REPORT_SOC2_COVERAGE_TARGET_PCT", 95)
+    rows: List[Dict[str, str]] = []
+
+    def row(criterion: str, control: str, status: str, evidence: str) -> None:
+        rows.append({"criterion": criterion, "control": control,
+                     "status": status, "evidence": evidence})
+
+    # CC7.1 — detection: TSC-mapped alerting off the Wazuh estate.
+    if compliance.get("unavailable"):
+        row("CC7.1", "Threat and anomaly detection", SOC2_NO_DATA,
+            "TSC-mapped alert data could not be read for this period.")
+    else:
+        alerts = int(compliance.get("total_alerts", 0) or 0)
+        critical_high = int(compliance.get("critical_high", 0) or 0)
+        if alerts:
+            # Detection that surfaces critical alerts is the control working, not
+            # failing — the response to them is judged by CC7.3 / CC7.4 below.
+            controls = int(compliance.get("unique_controls", 0) or 0)
+            seen_on = int(compliance.get("affected_agents", 0) or 0)
+            # Wazuh rule level, not the Jira severity behind the incident counts —
+            # say so, so the two numbers are not read as the same funnel.
+            detail = f"{alerts:,} TSC-mapped alerts across {controls:,} control(s) on {seen_on:,} agent(s)"
+            row("CC7.1", "Threat and anomaly detection", SOC2_MET,
+                f"{detail}; {critical_high:,} at critical/high Wazuh rule level" if critical_high
+                else f"{detail}; none at critical/high rule level")
+        else:
+            row("CC7.1", "Threat and anomaly detection", SOC2_MET,
+                "Detection pipeline operational; no TSC-mapped alerts recorded this period.")
+
+    # CC7.1 — the other half of detection: what scanning found, and how fast it was fixed.
+    if sections.get("vuln", True) and vuln:
+        v_sla = (vuln.get("sla") or {}).get("overall")
+        total_open = int(vuln.get("total_open", 0) or 0)
+        resolved = int(vuln.get("resolved", 0) or 0)
+        control = "Vulnerability identification and remediation"
+        found = (f'{total_open:,} open ({int(vuln.get("crit_open", 0) or 0):,} critical, '
+                 f'{int(vuln.get("high_open", 0) or 0):,} high); ')
+        if resolved and v_sla is not None:
+            row("CC7.1", control, SOC2_MET if v_sla >= sla_target else SOC2_ATTENTION,
+                f"{found}{resolved:,} remediated this period, {v_sla}% within remediation SLA")
+        elif resolved:
+            row("CC7.1", control, SOC2_MET, f"{found}{resolved:,} remediated this period")
+        elif total_open:
+            # Identification ran, remediation did not: a week that closes nothing
+            # while exposure is open has no remediation evidence to show.
+            row("CC7.1", control, SOC2_ATTENTION, f"{found}none remediated this period")
+        else:
+            row("CC7.1", control, SOC2_MET,
+                "No open vulnerabilities outstanding at the reporting cut-off.")
+
+    # CC7.2 — monitoring coverage: an agent that stopped reporting is a blind spot.
+    if sections.get("agent_status", True):
+        total_agents = int(agents.get("total", 0) or 0)
+        if agents.get("unavailable") or not total_agents:
+            row("CC7.2", "Continuous security monitoring", SOC2_NO_DATA,
+                "Agent heartbeat data could not be read for this period.")
+        else:
+            active = int(agents.get("active", 0) or 0)
+            coverage = round(active / total_agents * 100)
+            row("CC7.2", "Continuous security monitoring",
+                SOC2_MET if coverage >= coverage_target else SOC2_ATTENTION,
+                f"{active:,} of {total_agents:,} agents reporting within 24h ({coverage}%)")
+
+    # CC7.3 — every alert that mattered became a ticket an analyst worked.
+    opened = int(exec_.get("opened", 0) or 0)
+    timings = [f"{label} {exec_.get(key)}" for key, label in
+               (("mttd", "mean time to detect"), ("mttt", "mean time to ticket"))
+               if exec_.get(key) and exec_.get(key) != "—"]
+    if opened:
+        detail = f"{opened:,} incidents raised and triaged"
+        row("CC7.3", "Security event evaluation and ticketing", SOC2_MET,
+            f"{detail}; {', '.join(timings)}" if timings else detail)
+    else:
+        row("CC7.3", "Security event evaluation and ticketing", SOC2_MET,
+            "No security events required evaluation this period.")
+
+    # CC7.4 — response speed, against the severity SLA the report already publishes.
+    overall = sla.get("overall")
+    if overall is None:
+        row("CC7.4", "Incident response within SLA", SOC2_NO_DATA,
+            "No incidents were resolved this period, so SLA attainment is not evidenced.")
+    else:
+        resolved_total = int(sla.get("total", 0) or 0)
+        row("CC7.4", "Incident response within SLA",
+            SOC2_MET if overall >= sla_target else SOC2_ATTENTION,
+            f'{overall}% of {resolved_total:,} resolved incidents met their severity SLA '
+            f'({int(sla.get("met", 0) or 0):,}/{resolved_total:,})')
+
+    # CC7.5 — recovery: a backlog that keeps pace, not a demand for a zeroed queue.
+    closed = int(exec_.get("closed", 0) or 0)
+    still_open = int(exec_.get("open", 0) or 0)
+    closure_target = _soc2_target("REPORT_SOC2_CLOSURE_TARGET_PCT", 90)
+    closure_rate = round(closed / opened * 100) if opened else 100
+    recovery = (f"{closed:,} closed against {opened:,} raised ({closure_rate}%); "
+                f"{still_open:,} open at the reporting cut-off")
+    if exec_.get("mttc") and exec_.get("mttc") != "—":
+        recovery += f'; mean time to close {exec_["mttc"]}'
+    row("CC7.5", "Incident resolution and recovery",
+        SOC2_MET if closure_rate >= closure_target else SOC2_ATTENTION, recovery)
+
+    # A1.2 — availability, only when the client's monitoring feed is in the report.
+    if sections.get("availability", True) and availability:
+        uptime, target = availability.get("uptime", ""), availability.get("sla", "")
+        uptime_pct, target_pct = _pct(uptime), _pct(target)
+        detail = f"{uptime} uptime against a {target} target" if target else f"{uptime} uptime"
+        outages = int(availability.get("outages", 0) or 0)
+        detail += f"; {outages:,} outage(s) recorded"
+        if uptime_pct is None or target_pct is None:
+            row("A1.2", "Monitored system availability", SOC2_NO_DATA,
+                "Availability data could not be read for this period.")
+        else:
+            row("A1.2", "Monitored system availability",
+                SOC2_MET if uptime_pct >= target_pct and not outages else SOC2_ATTENTION, detail)
+    return rows
+
+
 def jira_site_url() -> str:
     """Jira site URL, from JIRA_SITE_URL (or JIRA_BASE_URL, as athena-pallas names it)."""
     return _env("JIRA_SITE_URL", "") or _env("JIRA_BASE_URL", "")
@@ -1824,6 +2063,21 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
             log(f"Agent heartbeat status unavailable: {exc}", level="WARNING")
             agent_data = {"unavailable": True}
 
+    soc2_data = (args.supplemental_data or {}).get("soc2")
+    if sections_enabled.get("soc2", True) and soc2_data is None:
+        log("Report build phase: SOC 2 TSC monitoring status.")
+        try:
+            soc2_data = soc2_compliance_snapshot(cli, start, end)
+            log(
+                "SOC 2 TSC monitoring status done: "
+                f"alerts={soc2_data['total_alerts']} "
+                f"critical_high={soc2_data['critical_high']} "
+                f"controls={soc2_data['unique_controls']}"
+            )
+        except (OpenSearchError, AttributeError, TypeError, ValueError) as exc:
+            log(f"SOC 2 TSC monitoring status unavailable: {exc}", level="WARNING")
+            soc2_data = {"unavailable": True}
+
     vuln_open_jql = scoped(VULN_TYPE, "statusCategory != Done", "resolution is EMPTY", sev_in(vuln_filter_values))
     vuln_closed_jql = closed(VULN_TYPE, start, end)
     vuln_new_jql = opened(VULN_TYPE, start, end)
@@ -1882,14 +2136,22 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
             "links": vuln_links, "note": "",
         },
         "agent_status": agent_data,
+        "soc2": soc2_data,
+        "soc2_src": "Wazuh · Trust Services Criteria (TSC) monitoring",
         "vuln_src": "Athena Pallas · Jira-synced vulnerabilities",
         "_sections_enabled": sections_enabled,
     }
-    # supplemental (device / endpoint / availability)
+    # Supplemental data can override generated sections for previews or offline runs.
     if args.supplemental_data:
-        for section in ("device", "endpoint", "agent_status", "availability"):
+        for section in ("device", "endpoint", "agent_status", "soc2", "availability"):
             if section in args.supplemental_data:
                 data[section] = args.supplemental_data[section]
+    # Last, so the criteria read the finished metrics — including any supplemental override.
+    if sections_enabled.get("soc2", True):
+        criteria = soc2_criteria(data)
+        data["soc2"] = {**(data.get("soc2") or {}), "criteria": criteria}
+        log(f"SOC 2 criteria done: rows={len(criteria)} "
+            f"met={sum(1 for r in criteria if r['status'] == SOC2_MET)}")
     log(f"Report build done: elapsed={time.perf_counter() - build_started:.2f}s sections={sections_enabled}")
     return data
 
@@ -1954,7 +2216,7 @@ def sample_data() -> Dict[str, Any]:
         )
     }
     vuln_links = {key: jira_filter for key in ("critical", "high", "resolved", "new", "severity", "sla")}
-    return {
+    sample: Dict[str, Any] = {
         "client": "Neuro", "environment": "Production", "tenant": "neuro.athenasecuritygrp.com",
         "project_key": "NSO", "project_name": "Neuro Security Operations",
         "period_label": "Mon 29 Jun – Sun 5 Jul 2026", "week_start": "Monday", "_period_end": "2026-07-05",
@@ -1964,6 +2226,7 @@ def sample_data() -> Dict[str, Any]:
             "agent_status": True,
             "vuln": True,
             "availability": False,
+            "soc2": True,
         },
         "generated": "6 Jul 2026, 09:01 ET", "support_email": "alerts@neuro.athenasecuritygrp.com",
         "preview_note": ("<strong>Template preview.</strong> Illustrative sample data — run "
@@ -2058,6 +2321,20 @@ def sample_data() -> Dict[str, Any]:
             ],
             "inactive_more": 3,
         },
+        "soc2": {
+            "status": "Attention required",
+            "status_kind": "red",
+            "status_note": "3 critical/high TSC-mapped alerts require review.",
+            "total_alerts": 42,
+            "critical_high": 3,
+            "unique_controls": 8,
+            "affected_agents": 12,
+            "severity": [("Critical", 1), ("High", 2), ("Medium", 14), ("Low", 25)],
+            "top_controls": [("CC6.1", 12), ("CC7.2", 9), ("CC7.3", 7), ("CC8.1", 5)],
+            "dashboard_url": "https://neuro.athenasecuritygrp.com/app/discover#/",
+            "source": "wazuh-alerts-*",
+        },
+        "soc2_src": "Wazuh · Trust Services Criteria (TSC) monitoring",
         "vuln": {
             "crit_open": 4, "high_open": 31, "critical_note": "across the estate",
             "high_note": "across 12 assets", "resolved": 47,
@@ -2081,6 +2358,8 @@ def sample_data() -> Dict[str, Any]:
         "availability": {"uptime": "99.98%", "sla": "99.9%", "outages": 0, "outages_note": "none recorded",
                           "maintenance": 1, "maint_note": "8 min · off-hours", "monitoring": "24 / 7"},
     }
+    sample["soc2"]["criteria"] = soc2_criteria(sample)
+    return sample
 
 
 # --------------------------------------------------------------------------- #
@@ -2122,7 +2401,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
     p.add_argument(
         "--supplemental",
-        help="JSON file with optional device/endpoint/agent-status/availability overrides.",
+        help="JSON file with optional device/endpoint/agent-status/SOC-2/availability overrides.",
     )
     p.add_argument("--email", action="store_true",
                    help="Also write an email-safe HTML version (<out>-email.html) for pasting into Outlook.")

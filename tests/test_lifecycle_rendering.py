@@ -64,6 +64,37 @@ class LifecycleRenderingTests(unittest.TestCase):
                 tile_tail = executive_section[start:start + 1200]
                 self.assertIn("<a href=", tile_tail)
 
+    def test_soc2_status_is_the_final_section_and_has_audit_disclaimer(self) -> None:
+        data = generate_report.sample_data()
+
+        for output in (render.render_report(data, css=""), render_email.render_email(data)):
+            self.assertGreater(output.index("SOC 2 Compliance Status"), output.index("Vulnerability status"))
+            self.assertLess(output.index("SOC 2 Compliance Status"), output.index("Prepared by the Athena SOC team"))
+            self.assertIn("Operational monitoring evidence only", output)
+            self.assertIn("not an audit opinion", output)
+            self.assertIn("CC6.1", output)
+
+    def test_soc2_renders_a_criterion_row_per_control_with_its_evidence(self) -> None:
+        data = generate_report.sample_data()
+
+        for output in (render.render_report(data, css=""), render_email.render_email(data)):
+            self.assertIn("Evidence (this period)", output)
+            for row in data["soc2"]["criteria"]:
+                self.assertIn(row["control"], output)
+                self.assertIn(row["evidence"], output)
+            self.assertIn("Met", output)
+            self.assertIn("Attention", output)
+
+    def test_soc2_section_still_renders_when_the_wazuh_read_fails(self) -> None:
+        data = generate_report.sample_data()
+        data["soc2"] = {"unavailable": True}
+        data["soc2"]["criteria"] = generate_report.soc2_criteria(data)
+
+        for output in (render.render_report(data, css=""), render_email.render_email(data)):
+            self.assertNotIn("SOC 2 monitoring data unavailable", output)
+            self.assertIn("Not evidenced", output)
+            self.assertIn("Incident response within SLA", output)
+
 
 if __name__ == "__main__":
     unittest.main()
