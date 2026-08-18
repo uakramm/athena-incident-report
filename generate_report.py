@@ -1070,7 +1070,7 @@ def agent_status_snapshot(_cli: Any, now: Optional[dt.datetime] = None) -> Dict[
             "name": str(agent.get("name") or "Unknown"),
             "id": str(agent.get("id") or "-"),
             "os": os_name,
-            "last_seen": strip_leading_zero(last_seen.strftime("%d %b %Y, %H:%M UTC")),
+            "last_seen": fmt_report_dt(last_seen),
             "inactive": fmt_age(last_seen, now),
             "hours": hours,
             "category": category,
@@ -1509,22 +1509,39 @@ def strip_leading_zero(text: str) -> str:
     return re.sub(r"(?<!\S)0(\d)", r"\1", text)
 
 
-def generated_string() -> str:
-    """Now, in REPORT_TIMEZONE (default US Eastern), e.g. '6 Jul 2026, 09:01 ET'.
-    The zone label is generalised: EDT/EST -> ET, CDT/CST -> CT, PDT/PST -> PT."""
+def report_timezone() -> dt.tzinfo:
+    """REPORT_TIMEZONE as a tzinfo (default US Eastern), falling back to UTC when
+    the name is unknown or the platform has no zone database."""
     tz_name = _env("REPORT_TIMEZONE", "America/New_York")
     try:
         from zoneinfo import ZoneInfo
-        tz = ZoneInfo(tz_name)
+        return ZoneInfo(tz_name)
     except Exception:
-        tz = dt.timezone.utc
-    now = dt.datetime.now(tz)
-    abbr = now.strftime("%Z") or "UTC"
-    # Generalise only the US zones, where E{S,D}T→ET etc. is the common convention.
+        return dt.timezone.utc
+
+
+def zone_label(when: dt.datetime) -> str:
+    """Zone abbreviation for a moment, generalised across US daylight saving:
+    EDT/EST -> ET, CDT/CST -> CT, MDT/MST -> MT, PDT/PST -> PT."""
+    abbr = when.strftime("%Z") or "UTC"
     us = {"EST": "ET", "EDT": "ET", "CST": "CT", "CDT": "CT",
           "MST": "MT", "MDT": "MT", "PST": "PT", "PDT": "PT"}
-    label = us.get(abbr, abbr)
-    return strip_leading_zero(now.strftime("%d %b %Y, %H:%M")) + f" {label}"
+    return us.get(abbr, abbr)
+
+
+def fmt_report_dt(when: dt.datetime, fmt: str = "%d %b %Y, %H:%M") -> str:
+    """A moment in REPORT_TIMEZONE, zone-labelled — e.g. '4 Aug 2026, 11:40 ET'.
+
+    Every timestamp the report shows a reader goes through here, so the client
+    reads one clock throughout instead of mixing UTC with their own zone.
+    """
+    local = when.astimezone(report_timezone())
+    return f"{strip_leading_zero(local.strftime(fmt))} {zone_label(local)}"
+
+
+def generated_string() -> str:
+    """Now, in REPORT_TIMEZONE (default US Eastern), e.g. '6 Jul 2026, 09:01 ET'."""
+    return fmt_report_dt(dt.datetime.now(report_timezone()))
 
 
 def period_label(start: dt.date, end: dt.date) -> str:
@@ -1537,7 +1554,8 @@ def period_label(start: dt.date, end: dt.date) -> str:
 # --------------------------------------------------------------------------- #
 
 def auto_commentary(*, opened_n: int, closed_n: int, open_n: int, prev_open: Optional[int],
-                    mttc_secs: Optional[float], inc_sla: Optional[Dict[str, Any]],
+                    mttc_secs: Optional[float], prev_mttc_secs: Optional[float] = None,
+                    inc_sla: Optional[Dict[str, Any]],
                     type_breakdown: Sequence[Tuple[str, int]], open_rows: Sequence[Dict[str, Any]],
                     include_vuln: bool, v_resolved: int, v_new: int,
                     vuln_sla: Optional[Dict[str, Any]]) -> str:
@@ -1568,7 +1586,16 @@ def auto_commentary(*, opened_n: int, closed_n: int, open_n: int, prev_open: Opt
         p1.append(", clearing the incident queue entirely")
     p1.append(".")
     if mttc_secs:
-        p1.append(f" Mean time to close held at {fmt_duration(mttc_secs)}.")
+        # Only "held" when it actually held — the tile beside this line shows the
+        # week-on-week delta, and the two must not tell different stories.
+        moved = (None if prev_mttc_secs in (None, 0)
+                 else (mttc_secs - prev_mttc_secs) / prev_mttc_secs)
+        if moved is None or abs(moved) < 0.10:
+            p1.append(f" Mean time to close held at {fmt_duration(mttc_secs)}.")
+        else:
+            direction = "rose to" if moved > 0 else "improved to"
+            p1.append(f" Mean time to close {direction} {fmt_duration(mttc_secs)} "
+                      f"from {fmt_duration(prev_mttc_secs)} the week prior.")
     if inc_sla and inc_sla.get("overall") is not None:
         p1.append(f" Overall <b>{inc_sla['overall']}%</b> of resolved incidents met their severity SLA")
         w = worst(inc_sla)
@@ -1870,7 +1897,7 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
             "type": (f.get("issuetype") or {}).get("name", "").replace("Security ", ""),
             "sev": lbl, "sev_class": cls,
             "summary": f.get("summary", ""), "source": source_of(f),
-            "opened": strip_leading_zero(created.strftime("%d %b %H:%M")) if created else "—",
+            "opened": fmt_report_dt(created, "%d %b %H:%M") if created else "—",
             "age": fmt_age(created, age_as_of), "assignee": assignee_of(f),
             "status": (f.get("status") or {}).get("name", ""),
         })
@@ -2034,7 +2061,7 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     elif _env_bool("REPORT_COMMENTARY_AUTO", True):
         commentary = auto_commentary(
             opened_n=opened_n, closed_n=closed_n, open_n=open_n, prev_open=p_open,
-            mttc_secs=mttc, inc_sla=sla, type_breakdown=type_breakdown, open_rows=open_rows,
+            mttc_secs=mttc, prev_mttc_secs=p_mttc, inc_sla=sla, type_breakdown=type_breakdown, open_rows=open_rows,
             include_vuln=include_vuln, v_resolved=v_resolved, v_new=v_new, vuln_sla=vuln_sla)
     else:
         commentary = ""
@@ -2228,7 +2255,7 @@ def sample_data() -> Dict[str, Any]:
             "availability": False,
             "soc2": True,
         },
-        "generated": "6 Jul 2026, 09:01 ET", "support_email": "alerts@neuro.athenasecuritygrp.com",
+        "generated": "6 Jul 2026, 9:01 ET", "support_email": "alerts@neuro.athenasecuritygrp.com",
         "preview_note": ("<strong>Template preview.</strong> Illustrative sample data — run "
                          "<code>generate_report.py</code> against a client's pallas-incidents index for live figures."),
         "exec": {
@@ -2307,17 +2334,17 @@ def sample_data() -> Dict[str, Any]:
             "protected": 84, "healthy": 82, "at_risk": 2, "at_risk_note": "LAP-014 · SRV-DB-02", "inactive": 2,
             "meters": [["Real-time protection", 82, 84, "ok"], ["Agent checking in", 82, 84, "ok"],
                        ["Signatures current", 84, 84, "ok"], ["Tamper protection", 84, 84, "ok"]],
-            "inactive_agents": [["LAP-014", "Windows 11", "4 Jul 22:15 UTC", "34h"],
-                                 ["dev-nrm-01", "Ubuntu 22.04", "4 Jul 18:25 UTC", "38h"]],
+            "inactive_agents": [["LAP-014", "Windows 11", "4 Jul 18:15 ET", "34h"],
+                                 ["dev-nrm-01", "Ubuntu 22.04", "4 Jul 14:25 ET", "38h"]],
         },
         "agent_status": {
             "total": 84, "active": 78, "inactive": 6,
             "inactive_24_72": 2, "inactive_3_7d": 3, "inactive_7_14d": 1,
             "dashboard_url": "https://neuro.athenasecuritygrp.com/app/endpoints-summary#/agents-preview/",
             "inactive_agents": [
-                {"name": "LAP-014", "id": "041", "os": "Windows 11", "last_seen": "4 Jul 2026, 22:15 UTC", "inactive": "34h", "category": "Inactive 24-72 hours"},
-                {"name": "dev-nrm-01", "id": "057", "os": "Ubuntu 22.04", "last_seen": "1 Jul 2026, 18:25 UTC", "inactive": "3d 19h", "category": "Inactive 3-7 days"},
-                {"name": "WKS-233", "id": "063", "os": "Windows 11", "last_seen": "26 Jun 2026, 09:10 UTC", "inactive": "9d 4h", "category": "Inactive 7-14 days"},
+                {"name": "LAP-014", "id": "041", "os": "Windows 11", "last_seen": "4 Jul 2026, 18:15 ET", "inactive": "34h", "category": "Inactive 24-72 hours"},
+                {"name": "dev-nrm-01", "id": "057", "os": "Ubuntu 22.04", "last_seen": "1 Jul 2026, 14:25 ET", "inactive": "3d 19h", "category": "Inactive 3-7 days"},
+                {"name": "WKS-233", "id": "063", "os": "Windows 11", "last_seen": "26 Jun 2026, 5:10 ET", "inactive": "9d 4h", "category": "Inactive 7-14 days"},
             ],
             "inactive_more": 3,
         },

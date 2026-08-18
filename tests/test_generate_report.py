@@ -258,6 +258,58 @@ class Soc2CriteriaTests(unittest.TestCase):
         self.assertEqual(self._row(rows, "Incident response")["status"], generate_report.SOC2_MET)
 
 
+class ReportTimezoneTests(unittest.TestCase):
+    def test_utc_moments_display_in_the_configured_zone(self) -> None:
+        moment = dt.datetime(2026, 8, 4, 15, 40, tzinfo=dt.timezone.utc)
+
+        with mock.patch.dict(os.environ, {"REPORT_TIMEZONE": "America/New_York"}):
+            self.assertEqual(generate_report.fmt_report_dt(moment), "4 Aug 2026, 11:40 ET")
+        with mock.patch.dict(os.environ, {"REPORT_TIMEZONE": "Asia/Karachi"}):
+            self.assertEqual(generate_report.fmt_report_dt(moment), "4 Aug 2026, 20:40 PKT")
+
+    def test_an_unknown_zone_falls_back_to_utc_rather_than_failing(self) -> None:
+        moment = dt.datetime(2026, 8, 4, 15, 40, tzinfo=dt.timezone.utc)
+
+        with mock.patch.dict(os.environ, {"REPORT_TIMEZONE": "Mars/Olympus_Mons"}):
+            self.assertEqual(generate_report.fmt_report_dt(moment), "4 Aug 2026, 15:40 UTC")
+
+    def test_agent_last_seen_is_reported_in_the_configured_zone(self) -> None:
+        now = dt.datetime(2026, 8, 18, 12, 0, tzinfo=dt.timezone.utc)
+        agents = [{"id": "108", "name": "dev-promachos-windows",
+                   "lastKeepAlive": "2026-08-04T15:40:00Z", "os": {"name": "Windows Server 2025"}}]
+
+        with mock.patch.object(generate_report, "_wazuh_manager_agents", return_value=agents), \
+                mock.patch.dict(os.environ, {"REPORT_TIMEZONE": "America/New_York"}):
+            result = generate_report.agent_status_snapshot(None, now)
+
+        self.assertEqual(result["inactive_agents"][0]["last_seen"], "4 Aug 2026, 11:40 ET")
+
+
+class CommentaryTests(unittest.TestCase):
+    def _commentary(self, mttc: float, prev_mttc: object) -> str:
+        return generate_report.auto_commentary(
+            opened_n=156, closed_n=144, open_n=48, prev_open=36,
+            mttc_secs=mttc, prev_mttc_secs=prev_mttc, inc_sla=None,
+            type_breakdown=[], open_rows=[], include_vuln=False,
+            v_resolved=0, v_new=0, vuln_sla=None,
+        )
+
+    def test_a_climbing_time_to_close_is_not_described_as_held(self) -> None:
+        text = self._commentary(42300, 10500)  # 11h 45m, up from 2h 55m
+
+        self.assertNotIn("held at", text)
+        self.assertIn("rose to 11h 45m from 2h 55m the week prior", text)
+
+    def test_a_falling_time_to_close_reads_as_an_improvement(self) -> None:
+        self.assertIn("improved to 2h 55m", self._commentary(10500, 42300))
+
+    def test_a_steady_time_to_close_still_reads_as_held(self) -> None:
+        self.assertIn("held at 11h 45m", self._commentary(42300, 41000))
+
+    def test_no_prior_week_falls_back_to_the_plain_figure(self) -> None:
+        self.assertIn("held at 11h 45m", self._commentary(42300, None))
+
+
 class IncidentSeverityTests(unittest.TestCase):
     def test_standard_sev_2_is_high(self) -> None:
         fields = {"summary": "[HIGH] [Office 365] Suspicious email", "severity": {"value": "Sev-2"}}

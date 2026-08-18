@@ -289,7 +289,9 @@ def _exec(d: Dict[str, Any], n: int = 1) -> str:
         _tile("blue", "Incidents opened", f'{e["opened"]:,}', e["opened_delta"], href=links.get("opened", "")),
         _tile("green", "Incidents closed", f'{e["closed"]:,}', e["closed_delta"], href=links.get("closed", "")),
         _tile("red", "Open at week end", f'{e["open"]:,}', e["open_delta"], href=links.get("open", "")),
-        _tile("green", "System availability", e["uptime"], e["uptime_note"], small=True),
+        # Green reads as "good"; with no uptime figure to show, stay neutral.
+        _tile("green" if str(e["uptime"]).strip() not in ("", "—") else "",
+              "System availability", e["uptime"], e["uptime_note"], small=True),
         _tile("", "Mean time to detect", e["mttd"], e["mttd_delta"], small=True, href=links.get("lifecycle_opened", ""), show_cta=False),
         _tile("", "Mean time to ticket", e["mttt"], e["mttt_delta"], small=True, href=links.get("lifecycle_opened", ""), show_cta=False),
         _tile("", "Mean time to respond", e["mttr"], e["mttr_delta"], small=True, href=links.get("lifecycle_opened", ""), show_cta=False),
