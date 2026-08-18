@@ -10,6 +10,16 @@ metrics, and a SOC 2 Compliance Status section based on Wazuh TSC mappings. It
 intentionally omits the long open/closed ticket tables; users can open the
 filtered Jira result behind each metric when they need ticket detail.
 
+The reporting week runs on the client's calendar, set by `REPORT_TIMEZONE`
+(default `America/New_York`). Both the week boundaries and every timestamp the
+report displays use that zone, so a ticket raised 23:00 Sunday local counts in
+that Sunday's week even though UTC has already rolled into Monday. Changing a
+tenant's `REPORT_TIMEZONE` shifts which tickets fall in which week, so counts
+either side of the change will not line up — worth a note to the client when it
+happens. Jira drill-down links carry plain date literals, which Jira reads in the
+viewer's own profile timezone; those links match the report exactly when the Jira
+site timezone and `REPORT_TIMEZONE` agree.
+
 Agent Status follows the existing Agent Summary definition: an agent is active
 when it reported within 24 hours, inactive agents are grouped into 24-72 hours,
 3-7 days, and 7-14 days, and agents not seen for more than 14 days are excluded.

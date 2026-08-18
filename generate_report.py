@@ -866,8 +866,9 @@ class OpenSearchClient:
 
         created = cls._date(fields.get("created"))
         resolved = cls._date(fields.get("resolutiondate"))
+        # Date literals are the client's calendar day (REPORT_TIMEZONE), not UTC's.
         for op, raw in re.findall(r'\bcreated\s*(>=|<)\s*"(\d{4}-\d{2}-\d{2})"', jql, re.IGNORECASE):
-            boundary = dt.datetime.combine(dt.date.fromisoformat(raw), dt.time.min, tzinfo=dt.timezone.utc)
+            boundary = day_start(dt.date.fromisoformat(raw))
             if created is None or (op == ">=" and created < boundary) or (op == "<" and created >= boundary):
                 return False
 
@@ -876,14 +877,12 @@ class OpenSearchClient:
             jql, re.IGNORECASE,
         )
         if open_at:
-            boundary = dt.datetime.combine(
-                dt.date.fromisoformat(open_at.group(1)), dt.time.min, tzinfo=dt.timezone.utc
-            )
+            boundary = day_start(dt.date.fromisoformat(open_at.group(1)))
             if resolved is not None and resolved < boundary:
                 return False
         else:
             for op, raw in re.findall(r'\bresolutiondate\s*(>=|<)\s*"(\d{4}-\d{2}-\d{2})"', jql, re.IGNORECASE):
-                boundary = dt.datetime.combine(dt.date.fromisoformat(raw), dt.time.min, tzinfo=dt.timezone.utc)
+                boundary = day_start(dt.date.fromisoformat(raw))
                 if resolved is None or (op == ">=" and resolved < boundary) or (op == "<" and resolved >= boundary):
                     return False
 
@@ -1116,7 +1115,10 @@ def soc2_compliance_snapshot(
         "query": {
             "bool": {
                 "filter": [
-                    {"range": {"timestamp": {"gte": start.isoformat(), "lt": end.isoformat()}}},
+                    # Offset-bearing instants, so the window is the client's week
+                    # rather than OpenSearch's default UTC reading of a bare date.
+                    {"range": {"timestamp": {"gte": day_start(start).isoformat(),
+                                             "lt": day_start(end).isoformat()}}},
                     {"exists": {"field": "rule.tsc"}},
                 ]
             }
@@ -1520,6 +1522,21 @@ def report_timezone() -> dt.tzinfo:
         return dt.timezone.utc
 
 
+def day_start(day: dt.date) -> dt.datetime:
+    """Midnight starting `day` in REPORT_TIMEZONE, as an aware instant.
+
+    Every date literal in this report's queries means this: the client's calendar
+    day, not UTC's. A ticket raised 23:00 Sunday in the client's zone belongs to
+    that Sunday's week even though UTC has already rolled into Monday.
+    """
+    return dt.datetime.combine(day, dt.time.min, tzinfo=report_timezone())
+
+
+def today_local() -> dt.date:
+    """Today's date in REPORT_TIMEZONE — which week 'this week' means."""
+    return dt.datetime.now(report_timezone()).date()
+
+
 def zone_label(when: dt.datetime) -> str:
     """Zone abbreviation for a moment, generalised across US daylight saving:
     EDT/EST -> ET, CDT/CST -> CT, MDT/MST -> MT, PDT/PST -> PT."""
@@ -1629,7 +1646,8 @@ def auto_commentary(*, opened_n: int, closed_n: int, open_n: int, prev_open: Opt
 def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     key = args.project_key
     now = dt.datetime.now(dt.timezone.utc)
-    anchor = dt.date.fromisoformat(args.week_of) if args.week_of else (now.date() - dt.timedelta(days=7))
+    # Which week "last week" is depends on the client's calendar, not UTC's.
+    anchor = dt.date.fromisoformat(args.week_of) if args.week_of else (today_local() - dt.timedelta(days=7))
     start, end = week_window(anchor, args.week_start)
     p_start, p_end = start - dt.timedelta(days=7), start  # prior week
     build_started = time.perf_counter()
@@ -1885,7 +1903,7 @@ def build_report(cli: Any, args: argparse.Namespace) -> Dict[str, Any]:
     ))
     open_detail_count = len(open_issues)
     open_issues = open_issues[:args.max_open_rows]
-    report_end_at = dt.datetime.combine(end, dt.time.min, tzinfo=dt.timezone.utc)
+    report_end_at = day_start(end)
     age_as_of = min(now, report_end_at)
     open_rows = []
     for it in open_issues:

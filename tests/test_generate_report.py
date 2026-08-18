@@ -130,15 +130,17 @@ class Soc2ComplianceTests(unittest.TestCase):
                 }
 
         client = Client()
-        result = generate_report.soc2_compliance_snapshot(
-            client, dt.date(2026, 8, 3), dt.date(2026, 8, 10)
-        )
+        with mock.patch.dict(os.environ, {"REPORT_TIMEZONE": "America/New_York"}):
+            result = generate_report.soc2_compliance_snapshot(
+                client, dt.date(2026, 8, 3), dt.date(2026, 8, 10)
+            )
 
         self.assertEqual(client.index, "wazuh-alerts-*")
         filters = client.body["query"]["bool"]["filter"]
         self.assertIn({"exists": {"field": "rule.tsc"}}, filters)
         self.assertIn(
-            {"range": {"timestamp": {"gte": "2026-08-03", "lt": "2026-08-10"}}},
+            {"range": {"timestamp": {"gte": "2026-08-03T00:00:00-04:00",
+                                     "lt": "2026-08-10T00:00:00-04:00"}}},
             filters,
         )
         self.assertEqual(result["total_alerts"], 21)
@@ -283,6 +285,38 @@ class ReportTimezoneTests(unittest.TestCase):
             result = generate_report.agent_status_snapshot(None, now)
 
         self.assertEqual(result["inactive_agents"][0]["last_seen"], "4 Aug 2026, 11:40 ET")
+
+
+class ReportingWeekBoundaryTests(unittest.TestCase):
+    """The week runs on the client's calendar day, so late-Sunday-local tickets
+    stay in that week even though UTC has already rolled over."""
+
+    WEEK = 'created >= "2026-08-10" AND created < "2026-08-17"'
+
+    def _in_week(self, created: str, tz: str = "America/New_York") -> bool:
+        issue = {"fields": {"created": created, "issuetype": {"name": "Security Incident"}}}
+        with mock.patch.dict(os.environ, {"REPORT_TIMEZONE": tz}):
+            return generate_report.OpenSearchClient._matches(issue, self.WEEK)
+
+    def test_late_sunday_local_belongs_to_the_week_it_was_raised_in(self) -> None:
+        # 02:00Z Mon 10 Aug is 22:00 ET Sun 9 Aug — the prior week, not this one.
+        self.assertFalse(self._in_week("2026-08-10T02:00:00.000+0000"))
+        # 02:00Z Mon 17 Aug is 22:00 ET Sun 16 Aug — still inside this week.
+        self.assertTrue(self._in_week("2026-08-17T02:00:00.000+0000"))
+
+    def test_the_first_local_moment_of_the_week_is_included(self) -> None:
+        self.assertTrue(self._in_week("2026-08-10T04:00:00.000+0000"))  # 00:00 ET Mon
+        self.assertFalse(self._in_week("2026-08-10T03:59:00.000+0000"))  # 23:59 ET Sun
+
+    def test_the_same_ticket_lands_differently_under_a_different_zone(self) -> None:
+        moment = "2026-08-17T02:00:00.000+0000"  # 22:00 ET Sun 16th, 07:00 PKT Mon 17th
+
+        self.assertTrue(self._in_week(moment, tz="America/New_York"))
+        self.assertFalse(self._in_week(moment, tz="Asia/Karachi"))
+
+    def test_utc_tenants_keep_the_old_boundaries(self) -> None:
+        self.assertTrue(self._in_week("2026-08-10T02:00:00.000+0000", tz="UTC"))
+        self.assertFalse(self._in_week("2026-08-17T02:00:00.000+0000", tz="UTC"))
 
 
 class CommentaryTests(unittest.TestCase):
