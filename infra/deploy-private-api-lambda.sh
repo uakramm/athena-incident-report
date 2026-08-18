@@ -11,6 +11,9 @@ BUILD_ID="${BUILD_ID:-$(date +%Y%m%d%H%M%S)}"
 ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-air-883111488482-us-east-2-20260710234738}"
 LAMBDA_RUNTIME="${LAMBDA_RUNTIME:-python3.12}"
 PYTHON_VERSION="${LAMBDA_RUNTIME#python}"
+LAMBDA_PLATFORM="${LAMBDA_PLATFORM:-manylinux_2_28_x86_64}"
+LAMBDA_FALLBACK_PLATFORM="${LAMBDA_FALLBACK_PLATFORM:-manylinux2014_x86_64}"
+PACKAGE_INDEX_URL="${PACKAGE_INDEX_URL:-https://pypi.org/simple}"
 
 : "${VPC_ID:=vpc-05b4f0960588d3016}"
 : "${SUBNET_IDS:=subnet-085d89c90fd008561}"
@@ -80,7 +83,9 @@ fi
 mkdir -p "$BUILD_DIR/source" "$BUILD_DIR/layer/python"
 
 python3 -m pip install \
-  --platform manylinux2014_x86_64 \
+  --index-url "$PACKAGE_INDEX_URL" \
+  --platform "$LAMBDA_PLATFORM" \
+  --platform "$LAMBDA_FALLBACK_PLATFORM" \
   --implementation cp \
   --python-version "$PYTHON_VERSION" \
   --only-binary=:all: \

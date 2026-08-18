@@ -15,6 +15,9 @@ ALLOW_EXISTING_ARTIFACT_BUCKET="${ALLOW_EXISTING_ARTIFACT_BUCKET:-$ALLOW_STACK_U
 ALLOW_SECRET_UPDATE="${ALLOW_SECRET_UPDATE:-false}"
 LAMBDA_RUNTIME="${LAMBDA_RUNTIME:-python3.12}"
 PYTHON_VERSION="${LAMBDA_RUNTIME#python}"
+LAMBDA_PLATFORM="${LAMBDA_PLATFORM:-manylinux_2_28_x86_64}"
+LAMBDA_FALLBACK_PLATFORM="${LAMBDA_FALLBACK_PLATFORM:-manylinux2014_x86_64}"
+PACKAGE_INDEX_URL="${PACKAGE_INDEX_URL:-https://pypi.org/simple}"
 
 : "${VPC_ID:?Set VPC_ID to the existing VPC id.}"
 : "${SUBNET_IDS:?Set SUBNET_IDS to comma-separated existing private subnet ids.}"
@@ -127,7 +130,9 @@ fi
 mkdir -p "$BUILD_DIR/source" "$BUILD_DIR/layer/python"
 
 python3 -m pip install \
-  --platform manylinux2014_x86_64 \
+  --index-url "$PACKAGE_INDEX_URL" \
+  --platform "$LAMBDA_PLATFORM" \
+  --platform "$LAMBDA_FALLBACK_PLATFORM" \
   --implementation cp \
   --python-version "$PYTHON_VERSION" \
   --only-binary=:all: \
